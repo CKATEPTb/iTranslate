@@ -3,6 +3,7 @@ import {DeepLSettings} from "./providers/DeepLSettings.tsx";
 import {GoogleSettings} from "./providers/GoogleSettings.tsx";
 import {LibreTranslateSettings} from "./providers/LibreTranslateSettings.tsx";
 import {LingvanexSettings} from "./providers/LingvanexSettings.tsx";
+import {LaraSettings} from "./providers/LaraSettings.tsx";
 import {MyMemorySettings} from "./providers/MyMemorySettings.tsx";
 import {OpenAISettings} from "./providers/OpenAISettings.tsx";
 import {
@@ -19,6 +20,7 @@ providers.set('DeepL', () => <DeepLSettings/>)
 providers.set('Google', () => <GoogleSettings/>)
 providers.set('LibreTranslate', () => <LibreTranslateSettings/>)
 providers.set('Lingvanex', () => <LingvanexSettings/>)
+providers.set('Lara', () => <LaraSettings/>)
 providers.set('MyMemory', () => <MyMemorySettings/>)
 providers.set('OpenAI (Ollama)', () => <OpenAISettings/>)
 
