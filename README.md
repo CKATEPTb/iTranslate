@@ -26,6 +26,7 @@ Choose the translation service that works best for you:
 * Google Translate
 * DeepL
 * Lingvanex
+* Lara
 * LibreTranslate
 * MyMemory
 * OpenAI / Ollama
