@@ -1,0 +1,25 @@
+{
+  "name": "itranslate",
+  "author": "CKATEPTb",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
+    "@types/chrome": "^0.1.24",
+    "@types/node": "^24.3.0",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  },
+  "dependencies": {
+    "@floating-ui/dom": "^1.7.6",
+    "nano-jsx": "^0.2.1"
+  }
+}
