@@ -5,9 +5,14 @@ on:
     branches:
       - production
 
+permissions:
+  contents: write
+
 jobs:
   build-and-release:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     strategy:
       matrix:
         node-version: [ 22 ]
@@ -32,6 +37,7 @@ jobs:
       - name: Publish release asset
         uses: ncipollo/release-action@v1
         with:
+          token: ${{ secrets.RELEASE_TOKEN }}
           tag: production-latest
           name: Production Latest
           allowUpdates: true
