@@ -9,6 +9,14 @@ type TranslateRequestMessage = {
   mode: TranslateMode
 }
 
+type SidePanelTranslateMessage = {
+  type: 'SIDEPANEL_TRANSLATE'
+  text: string
+  provider: string
+  from: string
+  to: string
+}
+
 async function translateText(request: TranslateRequestMessage): Promise<string> {
   const settings = await read()
   const source = request.mode === 'selection' ? settings.translate_select_from : settings.translate_input_from
@@ -22,6 +30,16 @@ async function translateText(request: TranslateRequestMessage): Promise<string> 
   })
 }
 
+async function translateSidePanel(request: SidePanelTranslateMessage): Promise<string> {
+  const settings = await read()
+  return getTranslator(request.provider).translate({
+    text: request.text,
+    from: request.from,
+    to: request.to,
+    settings
+  })
+}
+
 // message handler
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!message || typeof message !== 'object') {
@@ -29,7 +47,18 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     return
   }
 
-  const typed = message as Partial<TranslateRequestMessage>
+  const typed: any = message as Partial<TranslateRequestMessage & SidePanelTranslateMessage>
+
+  if (typed.type === 'SIDEPANEL_TRANSLATE' && typeof typed.text === 'string') {
+    translateSidePanel(typed as SidePanelTranslateMessage)
+      .then((translatedText) => sendResponse({ok: true, translatedText}))
+      .catch((error: unknown) => {
+        const messageText = error instanceof Error ? error.message : 'Unknown translation error'
+        sendResponse({ok: false, error: messageText})
+      })
+    return true
+  }
+
   if (typed.type !== 'TRANSLATE_TEXT' || typeof typed.text !== 'string') {
     sendResponse({ok: false, error: 'Invalid request'})
     return
