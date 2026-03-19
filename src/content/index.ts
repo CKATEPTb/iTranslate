@@ -108,6 +108,32 @@ function registerBackgroundMessageHandler() {
     })
 }
 
+const TOOLTIP_THEMES = {
+    dark: {
+        background: '#0f172a',
+        color: '#f1f5f9',
+        border: '1px solid rgba(148,163,184,0.24)',
+        boxShadow: '0 10px 28px rgba(2,6,23,0.45)',
+        scrollbarColor: 'rgba(148,163,184,0.35) transparent',
+    },
+    light: {
+        background: '#ffffff',
+        color: '#1e293b',
+        border: '1px solid rgba(148,163,184,0.5)',
+        boxShadow: '0 10px 28px rgba(0,0,0,0.12)',
+        scrollbarColor: 'rgba(100,116,139,0.35) transparent',
+    },
+}
+
+function applyTooltipTheme(el: HTMLElement, theme: 'dark' | 'light') {
+    const t = TOOLTIP_THEMES[theme]
+    el.style.background = t.background
+    el.style.color = t.color
+    el.style.border = t.border
+    el.style.boxShadow = t.boxShadow
+    el.style.scrollbarColor = t.scrollbarColor
+}
+
 function createTooltip(): TooltipController {
     if (!document.getElementById(`${TOOLTIP_ID}-style`)) {
         const s = document.createElement('style')
@@ -120,15 +146,26 @@ function createTooltip(): TooltipController {
     el.id = TOOLTIP_ID
     Object.assign(el.style, {
         position: 'fixed', zIndex: '2147483647', maxWidth: '340px',
-        padding: '10px 12px', borderRadius: '10px', background: '#0f172a',
-        color: '#fff', border: '1px solid rgba(148,163,184,0.24)',
+        padding: '10px 12px', borderRadius: '10px',
         font: '13px/1.4 "Segoe UI",Tahoma,sans-serif',
-        boxShadow: '0 10px 28px rgba(2,6,23,0.45)', display: 'none',
-        whiteSpace: 'pre-wrap', pointerEvents: 'auto', userSelect: 'text',
-        wordBreak: 'break-word', maxHeight: '50vh', overflowY: 'auto',
-        scrollbarWidth: 'thin', scrollbarColor: 'rgba(148,163,184,0.35) transparent',
+        display: 'none', whiteSpace: 'pre-wrap', pointerEvents: 'auto',
+        userSelect: 'text', wordBreak: 'break-word', maxHeight: '50vh',
+        overflowY: 'auto', scrollbarWidth: 'thin',
     })
+    applyTooltipTheme(el, 'dark')
     document.documentElement.appendChild(el)
+
+    // Read stored theme and update tooltip; listen for future changes
+    chrome.storage.local.get(['popup_theme'], (data) => {
+        const theme = (data['popup_theme'] as string) === 'light' ? 'light' : 'dark'
+        applyTooltipTheme(el, theme)
+    })
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes['popup_theme']) {
+            const theme = changes['popup_theme'].newValue === 'light' ? 'light' : 'dark'
+            applyTooltipTheme(el, theme)
+        }
+    })
 
     let cleanup: (() => void) | null = null
     const stop = () => {

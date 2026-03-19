@@ -44,6 +44,7 @@ export const TranslateInputFromStore = new StoreProxy('ru', 'translate_input_fro
 export const TranslateInputToStore = new StoreProxy('en', 'translate_input_to', 'local')
 
 export const SidePanelThemeStore = new StoreProxy('dark', 'sidepanel_theme', 'local')
+export const PopupThemeStore = new StoreProxy('dark', 'popup_theme', 'local')
 
 export const DeeplKeyStore = new StoreProxy('', 'deepl-key', 'local')
 export const GoogleKeyStore = new StoreProxy('', 'google-key', 'local')
