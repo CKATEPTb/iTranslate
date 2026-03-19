@@ -26,12 +26,19 @@ const fireInput = (el: HTMLElement) => {
     el.dispatchEvent(new Event('change', {bubbles: true}))
 }
 
+function getDeepActiveElement(root: Document | ShadowRoot = document): Element | null {
+    const active = root.activeElement
+    if (!active) return null
+    return active.shadowRoot ? getDeepActiveElement(active.shadowRoot) : active
+}
+
 const getEditable = (): HTMLElement | null => {
-    const el = document.activeElement
+    const el = getDeepActiveElement()
     if (!(el instanceof HTMLElement)) return null
     if (el instanceof HTMLTextAreaElement) return el
     if (el instanceof HTMLInputElement && !el.disabled && !el.readOnly && INPUT_TYPES.has(el.type)) return el
     if (el.isContentEditable) return el
+    if (el.hasAttribute('contenteditable') && el.getAttribute('contenteditable') !== 'false') return el
     return null
 }
 
