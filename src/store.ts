@@ -34,8 +34,8 @@ const StoreProxy: typeof Store = new Proxy(Store, {
   }
 })
 
-export const ProviderStore = new StoreProxy('DeepL', 'provider', 'local')
-export const SidePanelProviderStore = new StoreProxy('DeepL', 'sidepanel_provider', 'local')
+export const ProviderStore = new StoreProxy('Google', 'provider', 'local')
+export const SidePanelProviderStore = new StoreProxy('Google', 'sidepanel_provider', 'local')
 export const SidePanelFromStore = new StoreProxy('en', 'sidepanel_from', 'local')
 export const SidePanelToStore = new StoreProxy('ru', 'sidepanel_to', 'local')
 export const TranslateSelectFromStore = new StoreProxy('en', 'translate_select_from', 'local')
