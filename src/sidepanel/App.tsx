@@ -1,5 +1,5 @@
 import {Component, Store} from 'nano-jsx'
-import {SidePanelFromStore, SidePanelProviderStore, SidePanelToStore} from '../store.ts'
+import {SidePanelFromStore, SidePanelProviderStore, SidePanelThemeStore, SidePanelToStore} from '../store.ts'
 
 const PROVIDERS = ['DeepL', 'Google', 'LibreTranslate', 'Lingvanex', 'Lara', 'MyMemory', 'OpenAI (Ollama)']
 
@@ -33,12 +33,14 @@ const loadingStore = new Store(false, 'sp-loading', 'local')
 const errorStore = new Store('', 'sp-error', 'local')
 const showHistoryStore = new Store(false, 'sp-showhistory', 'local')
 const historyStore = new Store<HistoryEntry[]>([], 'sp-history-ui', 'local')
+const copiedStore = new Store(false, 'sp-copied', 'local')
 
 export class App extends Component {
     // Persisted stores
     provider = SidePanelProviderStore.use()
     from = SidePanelFromStore.use()
     to = SidePanelToStore.use()
+    theme = SidePanelThemeStore.use()
 
     // Local stores
     result = resultStore.use()
@@ -46,18 +48,44 @@ export class App extends Component {
     error = errorStore.use()
     showHistory = showHistoryStore.use()
     history = historyStore.use()
+    copied = copiedStore.use()
 
     // Plain property — no need to trigger re-render on every keystroke
     private inputText = ''
     private debounceTimer: ReturnType<typeof setTimeout> | null = null
+    // Track focused element to restore focus after re-render
+    private focusedId: string | null = null
+    // Sequence counter — incremented on each new translate call to cancel stale responses
+    private translateSeq = 0
 
     update() {
+        // Capture focus before re-render
+        const active = document.activeElement as HTMLElement | null
+        this.focusedId = active?.id ?? null
+
         super.update()
-        // Restore textarea value after re-render since replacing the DOM node resets it
+
+        // Restore textarea value and focus after re-render
         requestAnimationFrame(() => {
             const ta = document.getElementById('sp-input') as HTMLTextAreaElement | null
             if (ta) ta.value = this.inputText
+
+            if (this.focusedId) {
+                const el = document.getElementById(this.focusedId)
+                if (el) el.focus()
+            }
+
+            // Apply theme class to document root
+            this.applyTheme(this.theme.state as string)
         })
+    }
+
+    private applyTheme(theme: string) {
+        if (theme === 'dark') {
+            document.documentElement.classList.add('dark')
+        } else {
+            document.documentElement.classList.remove('dark')
+        }
     }
 
     didMount(): any {
@@ -70,7 +98,11 @@ export class App extends Component {
         this.error.subscribe(update)
         this.showHistory.subscribe(update)
         this.history.subscribe(update)
+        this.theme.subscribe(update)
+        this.copied.subscribe(update)
         void this.loadHistory()
+        // Apply initial theme
+        this.applyTheme(this.theme.state as string)
     }
 
     didUnmount(): any {
@@ -82,7 +114,9 @@ export class App extends Component {
         this.error.cancel()
         this.showHistory.cancel()
         this.history.cancel()
-        if (this.debounceTimer) clearTimeout(this.debounceTimer)
+        this.theme.cancel()
+        this.copied.cancel()
+        this.cancelTranslate()
     }
 
     private async loadHistory() {
@@ -94,24 +128,35 @@ export class App extends Component {
         await chrome.storage.local.set({[HISTORY_KEY]: list})
     }
 
+    private cancelTranslate() {
+        this.translateSeq++
+        if (this.debounceTimer) {
+            clearTimeout(this.debounceTimer)
+            this.debounceTimer = null
+        }
+        loadingStore.setState(false)
+    }
+
     private onInput(value: string) {
         this.inputText = value
-        if (this.debounceTimer) clearTimeout(this.debounceTimer)
+        // Cancel any running translation immediately
+        this.cancelTranslate()
         if (!value.trim()) {
             resultStore.setState('')
             errorStore.setState('')
             return
         }
-        this.debounceTimer = setTimeout(() => void this.doTranslate(), 500)
+        this.debounceTimer = setTimeout(() => void this.doTranslate(), 1500)
     }
 
     private async doTranslate() {
-        const text = this.inputText
-        if (!text.trim()) {
+        const text = this.inputText.trim()
+        if (!text) {
             resultStore.setState('')
             errorStore.setState('')
             return
         }
+        const seq = ++this.translateSeq
         loadingStore.setState(true)
         errorStore.setState('')
         try {
@@ -123,6 +168,8 @@ export class App extends Component {
                 to: this.to.state,
             }) as {ok: boolean; translatedText?: string; error?: string}
 
+            if (seq !== this.translateSeq) return
+
             if (response.ok && response.translatedText) {
                 const entry: HistoryEntry = {
                     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -133,7 +180,11 @@ export class App extends Component {
                     result: response.translatedText,
                     timestamp: Date.now(),
                 }
-                const newHistory = [entry, ...this.history.state].slice(0, HISTORY_LIMIT)
+                // Remove duplicates (same provider + language pair + source text)
+                const deduplicated = this.history.state.filter(
+                    e => !(e.provider === entry.provider && e.from === entry.from && e.to === entry.to && e.source === entry.source)
+                )
+                const newHistory = [entry, ...deduplicated].slice(0, HISTORY_LIMIT)
                 await this.saveHistory(newHistory)
                 historyStore.setState(newHistory)
                 resultStore.setState(response.translatedText)
@@ -141,9 +192,10 @@ export class App extends Component {
                 errorStore.setState(response.error ?? 'Translation failed')
             }
         } catch (e) {
+            if (seq !== this.translateSeq) return
             errorStore.setState(e instanceof Error ? e.message : String(e))
         } finally {
-            loadingStore.setState(false)
+            if (seq === this.translateSeq) loadingStore.setState(false)
         }
     }
 
@@ -151,6 +203,7 @@ export class App extends Component {
         const prevFrom = this.from.state
         this.from.setState(this.to.state)
         this.to.setState(prevFrom)
+        void this.doTranslate()
     }
 
     private onChangeFrom(event: Event) {
@@ -159,6 +212,7 @@ export class App extends Component {
         const prevTo = this.to.state
         this.from.setState(nextFrom)
         if (nextFrom === prevTo) this.to.setState(prevFrom)
+        void this.doTranslate()
     }
 
     private onChangeTo(event: Event) {
@@ -167,29 +221,45 @@ export class App extends Component {
         const prevTo = this.to.state
         this.to.setState(nextTo)
         if (nextTo === prevFrom) this.from.setState(prevTo)
+        void this.doTranslate()
     }
 
     private translateNow() {
-        if (this.debounceTimer) clearTimeout(this.debounceTimer)
+        this.cancelTranslate()
         void this.doTranslate()
     }
 
     private copyResult() {
-        if (this.result.state) void navigator.clipboard.writeText(this.result.state)
+        if (!this.result.state) return
+        void navigator.clipboard.writeText(this.result.state).then(() => {
+            copiedStore.setState(true)
+            setTimeout(() => copiedStore.setState(false), 1500)
+        })
     }
 
     private clear() {
-        if (this.debounceTimer) clearTimeout(this.debounceTimer)
+        this.cancelTranslate()
         this.inputText = ''
         resultStore.setState('')
         errorStore.setState('')
-        // clear the textarea DOM element directly
         const ta = document.querySelector<HTMLTextAreaElement>('#sp-input')
         if (ta) ta.value = ''
     }
 
     private clearHistory() {
         void chrome.storage.local.remove(HISTORY_KEY).then(() => historyStore.setState([]))
+    }
+
+    private deleteEntry(id: string) {
+        const newHistory = (this.history.state as HistoryEntry[]).filter(e => e.id !== id)
+        void this.saveHistory(newHistory)
+        historyStore.setState(newHistory)
+    }
+
+    private toggleTheme() {
+        const next = (this.theme.state as string) === 'dark' ? 'light' : 'dark'
+        SidePanelThemeStore.setState(next)
+        this.applyTheme(next)
     }
 
     private formatTime(ts: number): string {
@@ -214,16 +284,30 @@ export class App extends Component {
         const error = this.error.state as string
         const showHistory = this.showHistory.state as boolean
         const history = this.history.state as HistoryEntry[]
+        const isDark = (this.theme.state as string) === 'dark'
+        const copied = this.copied.state as boolean
 
         const selectClass = 'flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50'
         const btnSecondary = 'rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition disabled:opacity-40'
 
         return (
-            <div class="min-h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 p-3 flex flex-col gap-3 text-sm">
+            <div class="h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 p-3 flex flex-col gap-3 text-sm overflow-hidden">
 
-                {/* Provider + languages section */}
-                <section class="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 flex flex-col gap-2">
-                    <span class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide">Translator</span>
+                {/* Provider + languages + theme toggle */}
+                <section class="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 flex flex-col gap-2 flex-shrink-0">
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide flex-1">Translator</span>
+                        <button
+                            onclick={() => this.toggleTheme()}
+                            class="h-7 w-7 flex-shrink-0 flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 hover:text-blue-500 dark:hover:text-blue-400 hover:border-blue-400 dark:hover:border-blue-500 transition"
+                            title={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+                        >
+                            {isDark
+                                ? <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                                : <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                            }
+                        </button>
+                    </div>
 
                     <select
                         class={selectClass}
@@ -263,35 +347,35 @@ export class App extends Component {
                     </div>
                 </section>
 
-                {/* Input */}
+                {/* Input — grows to fill half the remaining space */}
                 <textarea
                     id="sp-input"
-                    class="w-full rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 min-h-32 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500"
+                    class="flex-1 min-h-0 w-full rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 overflow-y-auto"
                     placeholder="Enter text to translate..."
                     oninput={({target}: {target: HTMLTextAreaElement}) => this.onInput(target.value)}
                 />
 
                 {/* Buttons */}
-                <div class="flex gap-2">
+                <div class="flex gap-2 flex-shrink-0">
                     <button
-                        onclick={() => { if (!loading) this.translateNow() }}
-                        class={`flex-1 rounded-lg text-white px-3 py-1.5 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${loading ? 'bg-blue-600/50 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
+                        onclick={() => loading ? this.cancelTranslate() : this.translateNow()}
+                        class={`flex-1 rounded-lg text-white px-3 py-1.5 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${loading ? 'bg-red-500 hover:bg-red-400' : 'bg-blue-600 hover:bg-blue-500'}`}
                     >
-                        {loading ? 'Translating…' : 'Translate'}
+                        {loading ? 'Cancel' : 'Translate'}
                     </button>
                     <button
                         onclick={() => this.copyResult()}
-                        class={`${btnSecondary} ${!result ? 'opacity-40 cursor-not-allowed' : ''}`}
+                        class={`${btnSecondary} ${!result ? 'opacity-40 cursor-not-allowed' : ''} ${copied ? 'text-green-500 dark:text-green-400 border-green-400 dark:border-green-500' : ''}`}
                     >
-                        Copy
+                        {copied ? '✓ Copied' : 'Copy'}
                     </button>
                     <button onclick={() => this.clear()} class={btnSecondary}>
                         Clear
                     </button>
                 </div>
 
-                {/* Output */}
-                <div class="min-h-32 rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm whitespace-pre-wrap">
+                {/* Output — grows to fill remaining space */}
+                <div class="flex-1 min-h-0 rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm whitespace-pre-wrap overflow-y-auto">
                     {error
                         ? <span class="text-red-500 dark:text-red-400">{error}</span>
                         : result
@@ -301,7 +385,7 @@ export class App extends Component {
                 </div>
 
                 {/* History header */}
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 flex-shrink-0">
                     <button
                         onclick={() => showHistoryStore.setState(!showHistory)}
                         class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition"
@@ -322,7 +406,7 @@ export class App extends Component {
 
                 {/* History list */}
                 {showHistory && (
-                    <div class="flex flex-col gap-2 max-h-80 overflow-y-auto pr-1">
+                    <div class="flex flex-col gap-2 max-h-60 overflow-y-auto pr-1 flex-shrink-0">
                         {history.length === 0
                             ? <p class="text-xs text-slate-400 dark:text-slate-500 text-center py-6">No history yet</p>
                             : history.map(entry => (
@@ -330,12 +414,17 @@ export class App extends Component {
                                     class="rounded-lg border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-2.5 cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition"
                                     onclick={() => this.loadEntry(entry)}
                                 >
-                                    <div class="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
+                                    <div class="flex items-center gap-2 mb-1.5">
                                         <span class="text-xs font-semibold text-blue-500 dark:text-blue-400">{entry.provider}</span>
                                         <span class="text-xs text-slate-400 dark:text-slate-500">
                                             {LANG_LABELS[entry.from as LangCode] ?? entry.from} → {LANG_LABELS[entry.to as LangCode] ?? entry.to}
                                         </span>
-                                        <span class="text-xs text-slate-400 dark:text-slate-500">{this.formatTime(entry.timestamp)}</span>
+                                        <span class="text-xs text-slate-400 dark:text-slate-500 flex-1 text-right">{this.formatTime(entry.timestamp)}</span>
+                                        <button
+                                            onclick={(e: MouseEvent) => { e.stopPropagation(); this.deleteEntry(entry.id) }}
+                                            class="flex-shrink-0 text-slate-300 dark:text-slate-600 hover:text-red-400 dark:hover:text-red-400 transition leading-none"
+                                            title="Delete"
+                                        >×</button>
                                     </div>
                                     <p class="text-xs text-slate-500 dark:text-slate-400 truncate">{entry.source}</p>
                                     <p class="text-xs text-slate-800 dark:text-slate-200 truncate font-medium">{entry.result}</p>

@@ -43,6 +43,8 @@ export const TranslateSelectToStore = new StoreProxy('ru', 'translate_select_to'
 export const TranslateInputFromStore = new StoreProxy('ru', 'translate_input_from', 'local')
 export const TranslateInputToStore = new StoreProxy('en', 'translate_input_to', 'local')
 
+export const SidePanelThemeStore = new StoreProxy('dark', 'sidepanel_theme', 'local')
+
 export const DeeplKeyStore = new StoreProxy('', 'deepl-key', 'local')
 export const GoogleKeyStore = new StoreProxy('', 'google-key', 'local')
 export const LibreUrlStore = new StoreProxy('https://libretranslate.com/translate', 'libre-url', 'local')
