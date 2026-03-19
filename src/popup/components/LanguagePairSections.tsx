@@ -48,7 +48,7 @@ export class LanguagePairSection extends Component<LanguagePairSectionProps> {
                 <p class="mb-2 text-[11px] uppercase tracking-wider text-slate-400 dark:text-slate-400">{title}</p>
                 <div class="grid grid-cols-2 gap-2">
                     <select onchange={this.onChangeFrom.bind(this)}
-                            class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-2 text-slate-900 dark:text-slate-100">
+                            class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 pl-2 pr-6 py-2 text-slate-900 dark:text-slate-100">
                         {languages.map(language => {
                             if (language == fromStore.state) {
                                 return <option value={language} selected>{language}</option>
@@ -57,7 +57,7 @@ export class LanguagePairSection extends Component<LanguagePairSectionProps> {
                         })}
                     </select>
                     <select onchange={this.onChangeTo.bind(this)}
-                            class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-2 text-slate-900 dark:text-slate-100">
+                            class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 pl-2 pr-6 py-2 text-slate-900 dark:text-slate-100">
                         {languages.map(language => {
                             if (language == toStore.state) {
                                 return <option value={language} selected>{language}</option>
