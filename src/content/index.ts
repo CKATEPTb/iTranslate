@@ -26,12 +26,19 @@ const fireInput = (el: HTMLElement) => {
     el.dispatchEvent(new Event('change', {bubbles: true}))
 }
 
+function getDeepActiveElement(root: Document | ShadowRoot = document): Element | null {
+    const active = root.activeElement
+    if (!active) return null
+    return active.shadowRoot ? getDeepActiveElement(active.shadowRoot) : active
+}
+
 const getEditable = (): HTMLElement | null => {
-    const el = document.activeElement
+    const el = getDeepActiveElement()
     if (!(el instanceof HTMLElement)) return null
     if (el instanceof HTMLTextAreaElement) return el
     if (el instanceof HTMLInputElement && !el.disabled && !el.readOnly && INPUT_TYPES.has(el.type)) return el
     if (el.isContentEditable) return el
+    if (el.hasAttribute('contenteditable') && el.getAttribute('contenteditable') !== 'false') return el
     return null
 }
 
@@ -108,6 +115,32 @@ function registerBackgroundMessageHandler() {
     })
 }
 
+const TOOLTIP_THEMES = {
+    dark: {
+        background: '#0f172a',
+        color: '#f1f5f9',
+        border: '1px solid rgba(148,163,184,0.24)',
+        boxShadow: '0 10px 28px rgba(2,6,23,0.45)',
+        scrollbarColor: 'rgba(148,163,184,0.35) transparent',
+    },
+    light: {
+        background: '#ffffff',
+        color: '#1e293b',
+        border: '1px solid rgba(148,163,184,0.5)',
+        boxShadow: '0 10px 28px rgba(0,0,0,0.12)',
+        scrollbarColor: 'rgba(100,116,139,0.35) transparent',
+    },
+}
+
+function applyTooltipTheme(el: HTMLElement, theme: 'dark' | 'light') {
+    const t = TOOLTIP_THEMES[theme]
+    el.style.background = t.background
+    el.style.color = t.color
+    el.style.border = t.border
+    el.style.boxShadow = t.boxShadow
+    el.style.scrollbarColor = t.scrollbarColor
+}
+
 function createTooltip(): TooltipController {
     if (!document.getElementById(`${TOOLTIP_ID}-style`)) {
         const s = document.createElement('style')
@@ -120,15 +153,26 @@ function createTooltip(): TooltipController {
     el.id = TOOLTIP_ID
     Object.assign(el.style, {
         position: 'fixed', zIndex: '2147483647', maxWidth: '340px',
-        padding: '10px 12px', borderRadius: '10px', background: '#0f172a',
-        color: '#fff', border: '1px solid rgba(148,163,184,0.24)',
+        padding: '10px 12px', borderRadius: '10px',
         font: '13px/1.4 "Segoe UI",Tahoma,sans-serif',
-        boxShadow: '0 10px 28px rgba(2,6,23,0.45)', display: 'none',
-        whiteSpace: 'pre-wrap', pointerEvents: 'auto', userSelect: 'text',
-        wordBreak: 'break-word', maxHeight: '50vh', overflowY: 'auto',
-        scrollbarWidth: 'thin', scrollbarColor: 'rgba(148,163,184,0.35) transparent',
+        display: 'none', whiteSpace: 'pre-wrap', pointerEvents: 'auto',
+        userSelect: 'text', wordBreak: 'break-word', maxHeight: '50vh',
+        overflowY: 'auto', scrollbarWidth: 'thin',
     })
+    applyTooltipTheme(el, 'dark')
     document.documentElement.appendChild(el)
+
+    // Read stored theme and update tooltip; listen for future changes
+    chrome.storage.local.get(['popup_theme'], (data) => {
+        const theme = (data['popup_theme'] as string) === 'light' ? 'light' : 'dark'
+        applyTooltipTheme(el, theme)
+    })
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes['popup_theme']) {
+            const theme = changes['popup_theme'].newValue === 'light' ? 'light' : 'dark'
+            applyTooltipTheme(el, theme)
+        }
+    })
 
     let cleanup: (() => void) | null = null
     const stop = () => {
@@ -163,7 +207,8 @@ function createTooltip(): TooltipController {
 }
 
 function registerSelectionTranslation(tooltip: TooltipController) {
-    let timer: number | null = null, reqId = 0, mouseDown = false
+    let timer: number | null = null, reqId = 0
+    let pointerDownCount = 0
 
     const tooltipNode = () => document.getElementById(TOOLTIP_ID)
     const inTooltip = (t: EventTarget | null) => {
@@ -234,17 +279,25 @@ function registerSelectionTranslation(tooltip: TooltipController) {
     }
 
     const schedule = () => {
-        if (mouseDown) return;
-        clearTimer();
+        if (pointerDownCount > 0) return
+        clearTimer()
         timer = window.setTimeout(run, DELAY_MS)
     }
 
-    document.addEventListener('mousedown', () => {
-        mouseDown = true
+    document.addEventListener('pointerdown', e => {
+        if (e.pointerType === 'mouse') {
+            pointerDownCount++
+            clearTimer() // прерываем предыдущий запуск пока мышь зажата
+        }
     })
-    document.addEventListener('mouseup', () => {
-        mouseDown = false;
-        schedule()
+    document.addEventListener('pointerup', e => {
+        if (e.pointerType === 'mouse') {
+            pointerDownCount = Math.max(0, pointerDownCount - 1)
+            setTimeout(schedule, 0)
+        }
+    })
+    document.addEventListener('pointercancel', e => {
+        if (e.pointerType === 'mouse') pointerDownCount = Math.max(0, pointerDownCount - 1)
     })
     document.addEventListener('keyup', e => e.key === 'Escape' ? hide() : schedule())
     document.addEventListener('scroll', e => {

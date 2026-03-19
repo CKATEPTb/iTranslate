@@ -34,11 +34,17 @@ const StoreProxy: typeof Store = new Proxy(Store, {
   }
 })
 
-export const ProviderStore = new StoreProxy('DeepL', 'provider', 'local')
+export const ProviderStore = new StoreProxy('Google', 'provider', 'local')
+export const SidePanelProviderStore = new StoreProxy('Google', 'sidepanel_provider', 'local')
+export const SidePanelFromStore = new StoreProxy('en', 'sidepanel_from', 'local')
+export const SidePanelToStore = new StoreProxy('ru', 'sidepanel_to', 'local')
 export const TranslateSelectFromStore = new StoreProxy('en', 'translate_select_from', 'local')
 export const TranslateSelectToStore = new StoreProxy('ru', 'translate_select_to', 'local')
 export const TranslateInputFromStore = new StoreProxy('ru', 'translate_input_from', 'local')
 export const TranslateInputToStore = new StoreProxy('en', 'translate_input_to', 'local')
+
+export const SidePanelThemeStore = new StoreProxy('dark', 'sidepanel_theme', 'local')
+export const PopupThemeStore = new StoreProxy('dark', 'popup_theme', 'local')
 
 export const DeeplKeyStore = new StoreProxy('', 'deepl-key', 'local')
 export const GoogleKeyStore = new StoreProxy('', 'google-key', 'local')
