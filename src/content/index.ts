@@ -163,7 +163,8 @@ function createTooltip(): TooltipController {
 }
 
 function registerSelectionTranslation(tooltip: TooltipController) {
-    let timer: number | null = null, reqId = 0, mouseDown = false
+    let timer: number | null = null, reqId = 0
+    let pointerDownCount = 0
 
     const tooltipNode = () => document.getElementById(TOOLTIP_ID)
     const inTooltip = (t: EventTarget | null) => {
@@ -234,17 +235,25 @@ function registerSelectionTranslation(tooltip: TooltipController) {
     }
 
     const schedule = () => {
-        if (mouseDown) return;
-        clearTimer();
+        if (pointerDownCount > 0) return
+        clearTimer()
         timer = window.setTimeout(run, DELAY_MS)
     }
 
-    document.addEventListener('mousedown', () => {
-        mouseDown = true
+    document.addEventListener('pointerdown', e => {
+        if (e.pointerType === 'mouse') {
+            pointerDownCount++
+            clearTimer() // прерываем предыдущий запуск пока мышь зажата
+        }
     })
-    document.addEventListener('mouseup', () => {
-        mouseDown = false;
-        schedule()
+    document.addEventListener('pointerup', e => {
+        if (e.pointerType === 'mouse') {
+            pointerDownCount = Math.max(0, pointerDownCount - 1)
+            setTimeout(schedule, 0)
+        }
+    })
+    document.addEventListener('pointercancel', e => {
+        if (e.pointerType === 'mouse') pointerDownCount = Math.max(0, pointerDownCount - 1)
     })
     document.addEventListener('keyup', e => e.key === 'Escape' ? hide() : schedule())
     document.addEventListener('scroll', e => {
