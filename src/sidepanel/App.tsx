@@ -287,7 +287,7 @@ export class App extends Component {
         const isDark = (this.theme.state as string) === 'dark'
         const copied = this.copied.state as boolean
 
-        const selectClass = 'flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50'
+        const selectClass = 'flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 pl-2 pr-6 py-1.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50'
         const btnSecondary = 'rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition disabled:opacity-40'
 
         return (

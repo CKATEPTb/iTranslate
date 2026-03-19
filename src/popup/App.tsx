@@ -116,7 +116,7 @@ export class App extends Component {
                             <span class="text-slate-500 dark:text-slate-300">Translator</span>
                             <select
                                 onchange={({target}: {target: HTMLSelectElement}) => this.provider.setState(target.value)}
-                                class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-2 text-slate-900 dark:text-slate-100"
+                                class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 pl-2 pr-6 py-2 text-slate-900 dark:text-slate-100"
                             >
                                 {Array.from(providers.keys()).map(value => {
                                     if (value == this.provider.state) {
