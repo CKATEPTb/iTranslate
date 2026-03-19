@@ -51,6 +51,15 @@ export class App extends Component {
     private inputText = ''
     private debounceTimer: ReturnType<typeof setTimeout> | null = null
 
+    update() {
+        super.update()
+        // Restore textarea value after re-render since replacing the DOM node resets it
+        requestAnimationFrame(() => {
+            const ta = document.getElementById('sp-input') as HTMLTextAreaElement | null
+            if (ta) ta.value = this.inputText
+        })
+    }
+
     didMount(): any {
         const update = (n: any, p: any) => { if (n !== p) this.update() }
         this.provider.subscribe(update)
@@ -259,20 +268,21 @@ export class App extends Component {
                     id="sp-input"
                     class="w-full rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 min-h-32 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500"
                     placeholder="Enter text to translate..."
-                    value={this.inputText}
                     oninput={({target}: {target: HTMLTextAreaElement}) => this.onInput(target.value)}
                 />
 
                 {/* Buttons */}
                 <div class="flex gap-2">
                     <button
-                        onclick={() => this.translateNow()}
-                        disabled={loading}
-                        class="flex-1 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-3 py-1.5 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                        onclick={() => { if (!loading) this.translateNow() }}
+                        class={`flex-1 rounded-lg text-white px-3 py-1.5 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${loading ? 'bg-blue-600/50 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'}`}
                     >
                         {loading ? 'Translating…' : 'Translate'}
                     </button>
-                    <button onclick={() => this.copyResult()} disabled={!result} class={btnSecondary}>
+                    <button
+                        onclick={() => this.copyResult()}
+                        class={`${btnSecondary} ${!result ? 'opacity-40 cursor-not-allowed' : ''}`}
+                    >
                         Copy
                     </button>
                     <button onclick={() => this.clear()} class={btnSecondary}>
