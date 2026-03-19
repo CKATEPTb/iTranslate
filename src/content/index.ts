@@ -117,18 +117,20 @@ function registerBackgroundMessageHandler() {
 
 const TOOLTIP_THEMES = {
     dark: {
-        background: '#0f172a',
+        background: 'rgba(10, 12, 28, 0.72)',
         color: '#f1f5f9',
-        border: '1px solid rgba(148,163,184,0.24)',
-        boxShadow: '0 10px 28px rgba(2,6,23,0.45)',
-        scrollbarColor: 'rgba(148,163,184,0.35) transparent',
+        border: '1px solid rgba(255,255,255,0.12)',
+        boxShadow: '0 12px 40px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.08)',
+        backdropFilter: 'blur(24px) saturate(180%)',
+        scrollbarColor: 'rgba(255,255,255,0.18) transparent',
     },
     light: {
-        background: '#ffffff',
+        background: 'rgba(255,255,255,0.58)',
         color: '#1e293b',
-        border: '1px solid rgba(148,163,184,0.5)',
-        boxShadow: '0 10px 28px rgba(0,0,0,0.12)',
-        scrollbarColor: 'rgba(100,116,139,0.35) transparent',
+        border: '1px solid rgba(255,255,255,0.72)',
+        boxShadow: '0 12px 40px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.8)',
+        backdropFilter: 'blur(24px) saturate(180%)',
+        scrollbarColor: 'rgba(100,116,139,0.32) transparent',
     },
 }
 
@@ -138,6 +140,8 @@ function applyTooltipTheme(el: HTMLElement, theme: 'dark' | 'light') {
     el.style.color = t.color
     el.style.border = t.border
     el.style.boxShadow = t.boxShadow
+    el.style.backdropFilter = t.backdropFilter
+    ;(el.style as any).webkitBackdropFilter = t.backdropFilter
     el.style.scrollbarColor = t.scrollbarColor
 }
 
@@ -153,11 +157,12 @@ function createTooltip(): TooltipController {
     el.id = TOOLTIP_ID
     Object.assign(el.style, {
         position: 'fixed', zIndex: '2147483647', maxWidth: '340px',
-        padding: '10px 12px', borderRadius: '10px',
-        font: '13px/1.4 "Segoe UI",Tahoma,sans-serif',
+        padding: '10px 14px', borderRadius: '16px',
+        font: '13px/1.5 -apple-system,"Segoe UI",sans-serif',
         display: 'none', whiteSpace: 'pre-wrap', pointerEvents: 'auto',
         userSelect: 'text', wordBreak: 'break-word', maxHeight: '50vh',
         overflowY: 'auto', scrollbarWidth: 'thin',
+        transition: 'opacity 0.15s ease',
     })
     applyTooltipTheme(el, 'dark')
     document.documentElement.appendChild(el)
