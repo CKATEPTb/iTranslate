@@ -33,6 +33,7 @@ type PageTranslationGetActiveMessage = {
 type PageTranslationSetActiveMessage = {
   type: 'PAGE_TRANSLATION_SET_ACTIVE'
   enabled: boolean
+  sourceLanguage?: string
 }
 
 type PageTranslationGetStateMessage = {
@@ -76,6 +77,18 @@ type PageTranslationGlobalPreference = {
   alwaysFrom?: Record<string, boolean>
 }
 
+type PageTranslationTabSession = {
+  enabled: true
+  sourceLanguage?: DetectableLanguage
+  hostname?: string
+}
+
+type StoredPageTranslationTabSession = boolean | {
+  enabled?: boolean
+  sourceLanguage?: string
+  hostname?: string
+}
+
 type TranslateTextResult = {
   translatedText: string
   skipped?: boolean
@@ -90,7 +103,7 @@ const PAGE_TRANSLATION_PREFS_KEY = 'itranslate-page-translation-prefs'
 const PAGE_TRANSLATION_GLOBAL_PREFS_KEY = 'itranslate-page-translation-global-prefs'
 const PAGE_TRANSLATION_ANALYSIS_MIN_WEIGHT = 160
 const PROVIDERS_WITH_NATIVE_AUTO_SOURCE = new Set(['Google', 'DeepL', 'LibreTranslate', 'Lara', 'OpenAI (Ollama)'])
-const pageTranslationTabs = new Map<number, boolean>()
+const pageTranslationTabs = new Map<number, PageTranslationTabSession>()
 const LANGUAGE_ALIASES: Record<string, DetectableLanguage> = {
   eng: 'en',
   en: 'en',
@@ -178,12 +191,37 @@ function sendTabMessage(tabId: number, message: unknown): Promise<boolean> {
   })
 }
 
-async function readPageTranslationTabs(): Promise<Record<string, boolean>> {
-  const stored = (await chrome.storage.local.get([PAGE_TRANSLATION_TABS_KEY]))[PAGE_TRANSLATION_TABS_KEY]
-  return (stored as Record<string, boolean> | undefined) ?? {}
+function normalizePageTranslationTabSession(value: StoredPageTranslationTabSession | undefined): PageTranslationTabSession | null {
+  if (value === true) return {enabled: true}
+  if (!value || typeof value !== 'object' || value.enabled !== true) return null
+
+  const sourceLanguage = typeof value.sourceLanguage === 'string'
+    ? normalizeDetectableLanguage(value.sourceLanguage)
+    : null
+  const hostname = typeof value.hostname === 'string' ? normalizeSiteHostname(value.hostname) : ''
+  return {
+    enabled: true,
+    ...(sourceLanguage ? {sourceLanguage} : {}),
+    ...(hostname ? {hostname} : {}),
+  }
 }
 
-async function writePageTranslationTabs(tabs: Record<string, boolean>) {
+function serializePageTranslationTabSession(session: PageTranslationTabSession): StoredPageTranslationTabSession {
+  return session.sourceLanguage || session.hostname
+    ? {
+      enabled: true,
+      ...(session.sourceLanguage ? {sourceLanguage: session.sourceLanguage} : {}),
+      ...(session.hostname ? {hostname: session.hostname} : {}),
+    }
+    : true
+}
+
+async function readPageTranslationTabs(): Promise<Record<string, StoredPageTranslationTabSession>> {
+  const stored = (await chrome.storage.local.get([PAGE_TRANSLATION_TABS_KEY]))[PAGE_TRANSLATION_TABS_KEY]
+  return (stored as Record<string, StoredPageTranslationTabSession> | undefined) ?? {}
+}
+
+async function writePageTranslationTabs(tabs: Record<string, StoredPageTranslationTabSession>) {
   await chrome.storage.local.set({[PAGE_TRANSLATION_TABS_KEY]: tabs})
 }
 
@@ -268,7 +306,7 @@ async function disablePageTranslationForTab(tabId: number) {
   pageTranslationTabs.delete(tabId)
 
   const tabs = await readPageTranslationTabs()
-  if (tabs[String(tabId)] === true) {
+  if (normalizePageTranslationTabSession(tabs[String(tabId)])) {
     delete tabs[String(tabId)]
     await writePageTranslationTabs(tabs)
   }
@@ -276,29 +314,40 @@ async function disablePageTranslationForTab(tabId: number) {
   void sendTabMessage(tabId, {type: 'SET_PAGE_TRANSLATION', enabled: false})
 }
 
-async function isPageTranslationEnabled(tabId: number, tab?: chrome.tabs.Tab): Promise<boolean> {
+async function getPageTranslationTabSession(tabId: number, tab?: chrome.tabs.Tab): Promise<PageTranslationTabSession | null> {
   const settings = await read()
   if (!supportsPageTranslation(settings.provider, settings)) {
     await disablePageTranslationForTab(tabId)
-    return false
+    return null
   }
 
   if (tab && (await getPageTranslationSitePreferenceForTab(tab)).never) {
     await disablePageTranslationForTab(tabId)
-    return false
+    return null
   }
 
-  if (pageTranslationTabs.get(tabId) === true) {
-    return true
+  const cached = pageTranslationTabs.get(tabId)
+  if (cached) {
+    const currentHostname = tab ? getHostnameFromUrl(tab.url) : ''
+    if (cached.hostname && currentHostname && cached.hostname !== currentHostname) {
+      await disablePageTranslationForTab(tabId)
+      return null
+    }
+    return cached
   }
 
   const tabs = await readPageTranslationTabs()
-  const enabled = tabs[String(tabId)] === true
-  if (enabled) {
-    pageTranslationTabs.set(tabId, true)
+  const session = normalizePageTranslationTabSession(tabs[String(tabId)])
+  if (session) {
+    const currentHostname = tab ? getHostnameFromUrl(tab.url) : ''
+    if (session.hostname && currentHostname && session.hostname !== currentHostname) {
+      await disablePageTranslationForTab(tabId)
+      return null
+    }
+    pageTranslationTabs.set(tabId, session)
   }
 
-  return enabled
+  return session
 }
 
 function resolveSourceLanguage(text: string, requestedSource: string, provider: string): string {
@@ -395,15 +444,17 @@ async function getActivePageTranslationState() {
     return {enabled: false, supported, disabledBySite, ...preferenceSummary}
   }
 
+  const session = await getPageTranslationTabSession(tab.id, tab)
   return {
-    enabled: await isPageTranslationEnabled(tab.id, tab),
+    enabled: !!session,
+    sourceLanguage: session?.sourceLanguage,
     supported,
     disabledBySite,
     ...preferenceSummary,
   }
 }
 
-async function setPageTranslationStateForTab(tab: chrome.tabs.Tab, enabled: boolean): Promise<boolean> {
+async function setPageTranslationStateForTab(tab: chrome.tabs.Tab, enabled: boolean, sourceLanguage?: string): Promise<boolean> {
   if (tab?.id == null) {
     throw new Error('No active tab')
   }
@@ -423,22 +474,34 @@ async function setPageTranslationStateForTab(tab: chrome.tabs.Tab, enabled: bool
     }
   }
 
+  const normalizedSourceLanguage = sourceLanguage ? normalizeDetectableLanguage(sourceLanguage) : null
+  const hostname = getHostnameFromUrl(tab.url)
+  const session: PageTranslationTabSession = {
+    enabled: true,
+    ...(normalizedSourceLanguage ? {sourceLanguage: normalizedSourceLanguage} : {}),
+    ...(hostname ? {hostname} : {}),
+  }
+
   if (enabled) {
-    pageTranslationTabs.set(tab.id, true)
+    pageTranslationTabs.set(tab.id, session)
   } else {
     pageTranslationTabs.delete(tab.id)
   }
 
   const tabs = await readPageTranslationTabs()
   if (enabled) {
-    tabs[String(tab.id)] = true
+    tabs[String(tab.id)] = serializePageTranslationTabSession(session)
     await writePageTranslationTabs(tabs)
-  } else if (tabs[String(tab.id)] === true) {
+  } else if (normalizePageTranslationTabSession(tabs[String(tab.id)])) {
     delete tabs[String(tab.id)]
     await writePageTranslationTabs(tabs)
   }
 
-  void sendTabMessage(tab.id, {type: 'SET_PAGE_TRANSLATION', enabled})
+  void sendTabMessage(tab.id, {
+    type: 'SET_PAGE_TRANSLATION',
+    enabled,
+    ...(enabled && normalizedSourceLanguage ? {sourceLanguage: normalizedSourceLanguage} : {}),
+  })
   return enabled
 }
 
@@ -448,7 +511,7 @@ async function setActivePageTranslationState(request: PageTranslationSetActiveMe
     throw new Error('No active tab')
   }
 
-  return setPageTranslationStateForTab(tab, request.enabled)
+  return setPageTranslationStateForTab(tab, request.enabled, request.sourceLanguage)
 }
 
 async function getPageTranslationSuggestSettings(request: PageTranslationSuggestSettingsMessage) {
@@ -613,8 +676,8 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       return
     }
 
-    isPageTranslationEnabled(tabId, tab)
-      .then((enabled) => sendResponse({ok: true, enabled}))
+    getPageTranslationTabSession(tabId, tab)
+      .then((session) => sendResponse({ok: true, enabled: !!session, sourceLanguage: session?.sourceLanguage}))
       .catch((error: unknown) => {
         const messageText = error instanceof Error ? error.message : 'Unknown page translation error'
         sendResponse({ok: false, error: messageText})
@@ -734,16 +797,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     })
 })
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'loading') return
 
-  pageTranslationTabs.delete(tabId)
-  void readPageTranslationTabs()
-    .then((tabs) => {
-      if (tabs[String(tabId)] !== true) return
-      delete tabs[String(tabId)]
-      return writePageTranslationTabs(tabs)
-    })
+  void getPageTranslationTabSession(tabId, tab)
 })
 
 // command handler
