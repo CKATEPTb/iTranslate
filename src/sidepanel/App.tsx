@@ -289,6 +289,7 @@ export class App extends Component {
 
         const selectClass = 'flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 pl-2 pr-6 py-1.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50'
         const btnSecondary = 'rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition disabled:opacity-40'
+        const spinnerClass = 'inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-r-transparent'
 
         return (
             <div class="h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 p-3 flex flex-col gap-3 text-sm overflow-hidden">
@@ -378,6 +379,11 @@ export class App extends Component {
                 <div class="flex-1 min-h-0 rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm whitespace-pre-wrap overflow-y-auto">
                     {error
                         ? <span class="text-red-500 dark:text-red-400">{error}</span>
+                        : loading
+                            ? <span class="inline-flex items-center gap-2 text-blue-500 dark:text-blue-400">
+                                <span class={spinnerClass}></span>
+                                <span>Please wait, translating...</span>
+                            </span>
                         : result
                             ? <span class="text-slate-800 dark:text-slate-200">{result}</span>
                             : <span class="text-slate-400 dark:text-slate-500">Translation will appear here…</span>

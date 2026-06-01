@@ -2,13 +2,33 @@ import {autoUpdate, computePosition, flip, offset, shift, type VirtualElement} f
 
 type TranslateMode = 'selection' | 'input'
 type TranslateResponse = { ok: true; translatedText: string } | { ok: false; error?: string }
+type PageTranslationStateResponse = { ok: boolean; enabled?: boolean; error?: string }
 type TooltipController = { show(text: string, getRect: () => DOMRect): void; hide(): void; isVisible(): boolean }
 
 const TOOLTIP_ID = 'itranslate-tooltip'
+const STATUS_ID = 'itranslate-status'
+const STATUS_STYLE_ID = 'itranslate-status-style'
 const DELAY_MS = 400
 const MAX_GAP_PX = 96
+const PAGE_TRANSLATION_CONCURRENCY = 2
 const INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'email', 'password'])
 const MIDDLEWARE = [offset(10), flip({padding: 8}), shift({padding: 8})]
+const PAGE_TRANSLATION_SKIP_SELECTOR = [
+    `#${TOOLTIP_ID}`,
+    `#${STATUS_ID}`,
+    'script',
+    'style',
+    'noscript',
+    'textarea',
+    'code',
+    'pre',
+    'kbd',
+    'samp',
+    'svg',
+    'math',
+    'canvas',
+    '[aria-hidden="true"]',
+].join(',')
 
 const translate = (text: string, mode: TranslateMode): Promise<string | null> =>
     new Promise(resolve =>
@@ -16,6 +36,266 @@ const translate = (text: string, mode: TranslateMode): Promise<string | null> =>
             resolve(!chrome.runtime.lastError && r?.ok && typeof r.translatedText === 'string' ? r.translatedText : null)
         )
     )
+
+type TranslationStatusKey = 'input' | 'page'
+
+type PageTextMeta = {
+    sourceText: string
+    translatedText: string
+}
+
+let pageTranslationEnabled = false
+let pageTranslationObserver: MutationObserver | null = null
+let pageTranslationRunId = 0
+let pageTranslationActiveCount = 0
+
+const pageTranslationQueue: Text[] = []
+const pageTranslationQueued = new WeakSet<Text>()
+const pageTranslationMeta = new WeakMap<Text, PageTextMeta>()
+const pageTranslationNodes = new Set<Text>()
+const pageTranslationCache = new Map<string, string>()
+const translationStatuses = new Map<TranslationStatusKey, string>()
+
+let translationStatusEl: HTMLElement | null = null
+let translationStatusTextEl: HTMLElement | null = null
+let translationStatusHideTimer: number | null = null
+
+function ensureTranslationStatus() {
+    if (!document.getElementById(STATUS_STYLE_ID)) {
+        const style = document.createElement('style')
+        style.id = STATUS_STYLE_ID
+        style.textContent = `@keyframes itranslate-spin{to{transform:rotate(360deg)}}#${STATUS_ID}{position:fixed;right:16px;bottom:16px;z-index:2147483647;display:none;align-items:center;gap:8px;max-width:min(320px,calc(100vw - 32px));padding:9px 12px;border-radius:12px;background:rgba(15,23,42,.88);color:#f8fafc;border:1px solid rgba(255,255,255,.14);box-shadow:0 12px 32px rgba(15,23,42,.32);font:13px/1.35 -apple-system,"Segoe UI",sans-serif;pointer-events:none;backdrop-filter:blur(16px) saturate(160%);-webkit-backdrop-filter:blur(16px) saturate(160%)}#${STATUS_ID} .itranslate-status-spinner{width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:999px;animation:itranslate-spin .75s linear infinite;flex:0 0 auto}#${STATUS_ID} .itranslate-status-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}`
+        document.documentElement.appendChild(style)
+    }
+
+    if (translationStatusEl?.isConnected && translationStatusTextEl?.isConnected) return
+
+    const el = document.createElement('div')
+    el.id = STATUS_ID
+    el.setAttribute('role', 'status')
+    el.setAttribute('aria-live', 'polite')
+
+    const spinner = document.createElement('span')
+    spinner.className = 'itranslate-status-spinner'
+
+    const text = document.createElement('span')
+    text.className = 'itranslate-status-text'
+
+    el.append(spinner, text)
+    document.documentElement.appendChild(el)
+    translationStatusEl = el
+    translationStatusTextEl = text
+}
+
+function renderTranslationStatus() {
+    if (translationStatuses.size === 0) {
+        if (translationStatusHideTimer !== null) clearTimeout(translationStatusHideTimer)
+        translationStatusHideTimer = window.setTimeout(() => {
+            if (translationStatusEl) translationStatusEl.style.display = 'none'
+        }, 150)
+        return
+    }
+
+    ensureTranslationStatus()
+    if (translationStatusHideTimer !== null) {
+        clearTimeout(translationStatusHideTimer)
+        translationStatusHideTimer = null
+    }
+
+    const messages = Array.from(translationStatuses.values())
+    if (translationStatusTextEl) {
+        translationStatusTextEl.textContent = messages.length > 1 ? 'Please wait, translating...' : messages[0]
+    }
+    if (translationStatusEl) {
+        translationStatusEl.style.display = 'flex'
+    }
+}
+
+function showTranslationStatus(key: TranslationStatusKey, message: string) {
+    translationStatuses.set(key, message)
+    renderTranslationStatus()
+}
+
+function hideTranslationStatus(key: TranslationStatusKey) {
+    translationStatuses.delete(key)
+    renderTranslationStatus()
+}
+
+function splitPreservingWhitespace(text: string) {
+    const leading = text.match(/^\s*/)?.[0] ?? ''
+    const trailing = text.match(/\s*$/)?.[0] ?? ''
+    return {
+        leading,
+        value: text.trim(),
+        trailing,
+    }
+}
+
+function hasTranslatableText(text: string): boolean {
+    return /[\p{L}]/u.test(text)
+}
+
+function shouldSkipPageTranslationElement(element: Element): boolean {
+    return element.isContentEditable || !!element.closest(PAGE_TRANSLATION_SKIP_SELECTOR)
+}
+
+function isPageTranslationCandidate(node: Text): boolean {
+    const text = node.nodeValue ?? ''
+    const {value} = splitPreservingWhitespace(text)
+    if (!value || !hasTranslatableText(value)) return false
+
+    const meta = pageTranslationMeta.get(node)
+    if (meta && text === meta.translatedText) return false
+
+    const parent = node.parentElement
+    if (!parent || shouldSkipPageTranslationElement(parent)) return false
+
+    return true
+}
+
+function enqueuePageTextNode(node: Text) {
+    if (!pageTranslationEnabled || pageTranslationQueued.has(node) || !isPageTranslationCandidate(node)) return
+
+    pageTranslationQueued.add(node)
+    pageTranslationQueue.push(node)
+    updatePageTranslationStatus()
+    void drainPageTranslationQueue()
+}
+
+function collectPageTextNodes(root: Node) {
+    if (!pageTranslationEnabled) return
+
+    if (root.nodeType === Node.TEXT_NODE) {
+        enqueuePageTextNode(root as Text)
+        return
+    }
+
+    if (!(root instanceof Element) && !(root instanceof DocumentFragment)) return
+    if (root instanceof Element && shouldSkipPageTranslationElement(root)) return
+
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            return isPageTranslationCandidate(node as Text)
+                ? NodeFilter.FILTER_ACCEPT
+                : NodeFilter.FILTER_REJECT
+        }
+    })
+
+    while (walker.nextNode()) {
+        enqueuePageTextNode(walker.currentNode as Text)
+    }
+}
+
+async function translatePageTextNode(node: Text, runId: number) {
+    if (!pageTranslationEnabled || runId !== pageTranslationRunId || !node.isConnected || !isPageTranslationCandidate(node)) return
+
+    const sourceText = node.nodeValue ?? ''
+    const {leading, value, trailing} = splitPreservingWhitespace(sourceText)
+    let translated = pageTranslationCache.get(value)
+
+    if (!translated) {
+        translated = await translate(value, 'selection') ?? undefined
+        if (!translated) return
+        pageTranslationCache.set(value, translated)
+    }
+
+    if (!pageTranslationEnabled || runId !== pageTranslationRunId || !node.isConnected) return
+    if ((node.nodeValue ?? '') !== sourceText) return
+
+    const translatedText = `${leading}${translated}${trailing}`
+    pageTranslationMeta.set(node, {sourceText, translatedText})
+    pageTranslationNodes.add(node)
+    node.nodeValue = translatedText
+}
+
+function updatePageTranslationStatus() {
+    const pendingCount = pageTranslationQueue.length + pageTranslationActiveCount
+    if (!pageTranslationEnabled || pendingCount === 0) {
+        hideTranslationStatus('page')
+        return
+    }
+
+    showTranslationStatus('page', `Please wait, translating page (${pendingCount} left)...`)
+}
+
+async function drainPageTranslationQueue() {
+    while (pageTranslationEnabled && pageTranslationActiveCount < PAGE_TRANSLATION_CONCURRENCY && pageTranslationQueue.length > 0) {
+        const node = pageTranslationQueue.shift()
+        if (!node) continue
+
+        pageTranslationQueued.delete(node)
+        pageTranslationActiveCount++
+        updatePageTranslationStatus()
+        void translatePageTextNode(node, pageTranslationRunId).finally(() => {
+            pageTranslationActiveCount--
+            void drainPageTranslationQueue()
+            updatePageTranslationStatus()
+        })
+    }
+    updatePageTranslationStatus()
+}
+
+function restorePageTranslation() {
+    for (const node of pageTranslationNodes) {
+        const meta = pageTranslationMeta.get(node)
+        if (meta && node.isConnected && node.nodeValue === meta.translatedText) {
+            node.nodeValue = meta.sourceText
+        }
+    }
+    pageTranslationNodes.clear()
+}
+
+function startPageTranslation() {
+    if (pageTranslationEnabled && pageTranslationObserver) return
+
+    pageTranslationEnabled = true
+    pageTranslationRunId++
+    pageTranslationCache.clear()
+
+    if (document.body) {
+        collectPageTextNodes(document.body)
+    }
+    updatePageTranslationStatus()
+
+    pageTranslationObserver?.disconnect()
+    pageTranslationObserver = new MutationObserver((mutations) => {
+        if (!pageTranslationEnabled) return
+
+        for (const mutation of mutations) {
+            if (mutation.type === 'characterData' && mutation.target instanceof Text) {
+                enqueuePageTextNode(mutation.target)
+                continue
+            }
+
+            mutation.addedNodes.forEach(node => collectPageTextNodes(node))
+        }
+    })
+    pageTranslationObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+    })
+}
+
+function stopPageTranslation() {
+    if (!pageTranslationEnabled && !pageTranslationObserver) return
+
+    pageTranslationEnabled = false
+    pageTranslationRunId++
+    pageTranslationObserver?.disconnect()
+    pageTranslationObserver = null
+    pageTranslationQueue.length = 0
+    hideTranslationStatus('page')
+    restorePageTranslation()
+}
+
+function syncInitialPageTranslationState() {
+    chrome.runtime.sendMessage({type: 'PAGE_TRANSLATION_GET_STATE'}, (response: PageTranslationStateResponse | undefined) => {
+        if (!chrome.runtime.lastError && response?.ok && response.enabled) {
+            startPageTranslation()
+        }
+    })
+}
 
 const fireInput = (el: HTMLElement) => {
     if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
@@ -105,13 +385,22 @@ async function transformContentEditable(el: HTMLElement) {
 async function transformFocused() {
     const el = getEditable()
     if (!el) return
-    await (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-        ? transformInput(el) : transformContentEditable(el))
+    showTranslationStatus('input', 'Please wait, translating input...')
+    try {
+        await (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+            ? transformInput(el) : transformContentEditable(el))
+    } finally {
+        hideTranslationStatus('input')
+    }
 }
 
 function registerBackgroundMessageHandler() {
     chrome.runtime.onMessage.addListener((msg: unknown) => {
-        if ((msg as { type?: string })?.type === 'APPLY_TRANSFORM_TO_FOCUS') void transformFocused()
+        const typed = msg as { type?: string; enabled?: boolean }
+        if (typed.type === 'APPLY_TRANSFORM_TO_FOCUS') void transformFocused()
+        if (typed.type === 'SET_PAGE_TRANSLATION' && typeof typed.enabled === 'boolean') {
+            typed.enabled ? startPageTranslation() : stopPageTranslation()
+        }
     })
 }
 
@@ -277,7 +566,7 @@ function registerSelectionTranslation(tooltip: TooltipController) {
             return
         }
 
-        tooltip.show('Translating...', getRect)
+        tooltip.show('Please wait, translating...', getRect)
         const id = ++reqId
         const out = await translate(text, 'selection')
         if (id === reqId) tooltip.show(out ?? 'Failed to translate', getRect)
@@ -315,3 +604,4 @@ function registerSelectionTranslation(tooltip: TooltipController) {
 
 registerSelectionTranslation(createTooltip())
 registerBackgroundMessageHandler()
+syncInitialPageTranslationState()

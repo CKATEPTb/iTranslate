@@ -16,6 +16,18 @@ import {
 } from "../store.ts";
 import {LanguagePairSection} from "./components/LanguagePairSections.tsx";
 
+type ChromeWithSidePanel = typeof chrome & {
+    sidePanel: {
+        open: (options: {windowId: number}) => Promise<void>
+    }
+}
+
+type PageTranslationResponse = {
+    ok: boolean
+    enabled?: boolean
+    error?: string
+}
+
 const providers = new Map<string, () => Component>()
 providers.set('DeepL', () => <DeepLSettings/>)
 providers.set('Google', () => <GoogleSettings/>)
@@ -32,6 +44,8 @@ export class App extends Component {
     translateInputFrom = TranslateInputFromStore.use()
     translateInputTo = TranslateInputToStore.use()
     theme = PopupThemeStore.use()
+    private pageTranslationEnabled = false
+    private pageTranslationBusy = false
 
     private applyTheme(theme: string) {
         if (theme === 'dark') {
@@ -49,6 +63,45 @@ export class App extends Component {
         this.applyTheme(next)
     }
 
+    private async openSidePanel() {
+        const currentWindow = await chrome.windows.getCurrent()
+        if (currentWindow.id == null) return
+
+        await (chrome as ChromeWithSidePanel).sidePanel.open({windowId: currentWindow.id})
+        window.close()
+    }
+
+    private async refreshPageTranslationState() {
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'PAGE_TRANSLATION_GET_ACTIVE'
+            }) as PageTranslationResponse
+            this.pageTranslationEnabled = !!(response.ok && response.enabled)
+        } catch {
+            this.pageTranslationEnabled = false
+        }
+        this.update()
+    }
+
+    private async togglePageTranslation() {
+        if (this.pageTranslationBusy) return
+
+        this.pageTranslationBusy = true
+        this.update()
+        try {
+            const response = await chrome.runtime.sendMessage({
+                type: 'PAGE_TRANSLATION_SET_ACTIVE',
+                enabled: !this.pageTranslationEnabled
+            }) as PageTranslationResponse
+            if (response.ok) {
+                this.pageTranslationEnabled = !!response.enabled
+            }
+        } finally {
+            this.pageTranslationBusy = false
+            this.update()
+        }
+    }
+
     didMount(): any {
         const update = (newState: any, prevState: any) => {
             if (newState !== prevState) this.update()
@@ -56,6 +109,7 @@ export class App extends Component {
         this.provider.subscribe(update)
         this.theme.subscribe(update)
         this.applyTheme(this.theme.state as string)
+        void this.refreshPageTranslationState()
     }
 
     didUnmount(): any {
@@ -65,8 +119,13 @@ export class App extends Component {
 
     render() {
         const isDark = (this.theme.state as string) === 'dark'
+        const pageTranslationEnabled = this.pageTranslationEnabled
+        const pageTranslationBusy = this.pageTranslationBusy
 
         const iconBtn = 'inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-500 dark:text-slate-200 transition hover:border-slate-400 dark:hover:border-slate-500 hover:text-slate-900 dark:hover:text-white focus:outline-none focus:ring-2 focus:ring-slate-500/60'
+        const toggleTrack = `relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full border transition focus:outline-none focus:ring-2 focus:ring-slate-500/60 ${pageTranslationEnabled ? 'border-blue-500 bg-blue-600' : 'border-slate-200 dark:border-slate-700 bg-slate-200 dark:bg-slate-800'} ${pageTranslationBusy ? 'opacity-60' : ''}`
+        const toggleThumb = `h-5 w-5 rounded-full bg-white shadow-sm transition ${pageTranslationEnabled ? 'translate-x-5' : 'translate-x-0.5'}`
+        const spinnerClass = 'inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-r-transparent'
 
         return (
             <main class="w-95 p-4 text-slate-900 dark:text-slate-100 bg-linear-to-br from-slate-100 via-white to-slate-100 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
@@ -74,6 +133,18 @@ export class App extends Component {
                     <div class="flex items-center justify-between gap-2">
                         <h1 class="text-lg font-bold tracking-tight">iTranslate</h1>
                         <div class="flex items-center gap-2">
+                            <button
+                                onclick={() => void this.openSidePanel()}
+                                class={iconBtn}
+                                title="Open side panel"
+                            >
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                                    <path d="M15 4v16"></path>
+                                    <path d="M7 8h4"></path>
+                                    <path d="M7 12h4"></path>
+                                </svg>
+                            </button>
                             <button
                                 onclick={() => this.toggleTheme()}
                                 class={iconBtn}
@@ -137,6 +208,28 @@ export class App extends Component {
                             fromStore={this.translateInputFrom}
                             toStore={this.translateInputTo}
                         />
+
+                        <button
+                            type="button"
+                            aria-pressed={pageTranslationEnabled}
+                            aria-disabled={pageTranslationBusy}
+                            onclick={() => void this.togglePageTranslation()}
+                            class={`flex w-full items-center justify-between rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/70 p-3 text-left transition hover:border-blue-400 dark:hover:border-blue-500 focus:outline-none focus:ring-2 focus:ring-slate-500/60 ${pageTranslationBusy ? 'cursor-wait opacity-70' : ''}`}
+                            title={pageTranslationEnabled ? 'Disable page translation' : 'Enable page translation'}
+                        >
+                            <span class="grid gap-1 text-slate-500 dark:text-slate-300">
+                                <span>Translate page</span>
+                                {pageTranslationBusy && (
+                                    <span class="inline-flex items-center gap-1.5 text-[11px] text-blue-500 dark:text-blue-400">
+                                        <span class={spinnerClass}></span>
+                                        <span>Please wait...</span>
+                                    </span>
+                                )}
+                            </span>
+                            <span class={toggleTrack}>
+                                <span class={toggleThumb}></span>
+                            </span>
+                        </button>
 
                         {providers.get(this.provider.state)}
                     </section>
