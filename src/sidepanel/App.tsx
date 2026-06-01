@@ -1,12 +1,15 @@
 import {Component, Store} from 'nano-jsx'
 import {SidePanelFromStore, SidePanelProviderStore, SidePanelThemeStore, SidePanelToStore} from '../store.ts'
+import {DEFAULT_PROVIDER, isKnownProvider, normalizeProvider, TRANSLATION_PROVIDERS} from '../providers.ts'
 
-const PROVIDERS = ['DeepL', 'Google', 'LibreTranslate', 'Lingvanex', 'Lara', 'MyMemory', 'OpenAI (Ollama)']
-
-const LANGS = ['en', 'ru', 'ua', 'de', 'fr'] as const
-type LangCode = typeof LANGS[number]
+const TARGET_LANGS = ['en', 'ru', 'ua', 'de', 'fr'] as const
+const SOURCE_LANGS = ['auto', ...TARGET_LANGS] as const
+type TargetLangCode = typeof TARGET_LANGS[number]
+type SourceLangCode = typeof SOURCE_LANGS[number]
+type LangCode = SourceLangCode | TargetLangCode
 
 const LANG_LABELS: Record<LangCode, string> = {
+    auto: 'Auto detect',
     en: 'English',
     ru: 'Russian',
     ua: 'Ukrainian',
@@ -16,6 +19,10 @@ const LANG_LABELS: Record<LangCode, string> = {
 
 const HISTORY_KEY = 'sidepanel_history'
 const HISTORY_LIMIT = 100
+
+function getFallbackTargetLanguage(excluded: string): TargetLangCode {
+    return TARGET_LANGS.find(language => language !== excluded) ?? TARGET_LANGS[0]
+}
 
 interface HistoryEntry {
     id: string
@@ -88,6 +95,12 @@ export class App extends Component {
         }
     }
 
+    private ensureKnownProvider() {
+        if (!isKnownProvider(this.provider.state)) {
+            this.provider.setState(DEFAULT_PROVIDER)
+        }
+    }
+
     didMount(): any {
         const update = (n: any, p: any) => { if (n !== p) this.update() }
         this.provider.subscribe(update)
@@ -100,6 +113,7 @@ export class App extends Component {
         this.history.subscribe(update)
         this.theme.subscribe(update)
         this.copied.subscribe(update)
+        this.ensureKnownProvider()
         void this.loadHistory()
         // Apply initial theme
         this.applyTheme(this.theme.state as string)
@@ -159,11 +173,12 @@ export class App extends Component {
         const seq = ++this.translateSeq
         loadingStore.setState(true)
         errorStore.setState('')
+        const provider = normalizeProvider(this.provider.state)
         try {
             const response = await chrome.runtime.sendMessage({
                 type: 'SIDEPANEL_TRANSLATE',
                 text,
-                provider: this.provider.state,
+                provider,
                 from: this.from.state,
                 to: this.to.state,
             }) as {ok: boolean; translatedText?: string; error?: string}
@@ -173,7 +188,7 @@ export class App extends Component {
             if (response.ok && response.translatedText) {
                 const entry: HistoryEntry = {
                     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-                    provider: this.provider.state,
+                    provider,
                     from: this.from.state,
                     to: this.to.state,
                     source: text,
@@ -201,8 +216,9 @@ export class App extends Component {
 
     private swapLanguages() {
         const prevFrom = this.from.state
-        this.from.setState(this.to.state)
-        this.to.setState(prevFrom)
+        const prevTo = this.to.state
+        this.from.setState(prevTo)
+        this.to.setState(prevFrom === 'auto' ? getFallbackTargetLanguage(prevTo) : prevFrom)
         void this.doTranslate()
     }
 
@@ -211,7 +227,9 @@ export class App extends Component {
         const prevFrom = this.from.state
         const prevTo = this.to.state
         this.from.setState(nextFrom)
-        if (nextFrom === prevTo) this.to.setState(prevFrom)
+        if (nextFrom === prevTo) {
+            this.to.setState(prevFrom === 'auto' ? getFallbackTargetLanguage(nextFrom) : prevFrom)
+        }
         void this.doTranslate()
     }
 
@@ -277,8 +295,8 @@ export class App extends Component {
     }
 
     render() {
-        const from = this.from.state as LangCode
-        const to = this.to.state as LangCode
+        const from = this.from.state as SourceLangCode
+        const to = this.to.state as TargetLangCode
         const result = this.result.state as string
         const loading = this.loading.state as boolean
         const error = this.error.state as string
@@ -286,6 +304,7 @@ export class App extends Component {
         const history = this.history.state as HistoryEntry[]
         const isDark = (this.theme.state as string) === 'dark'
         const copied = this.copied.state as boolean
+        const provider = normalizeProvider(this.provider.state)
 
         const selectClass = 'flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 pl-2 pr-6 py-1.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/50'
         const btnSecondary = 'rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition disabled:opacity-40'
@@ -314,8 +333,8 @@ export class App extends Component {
                         class={selectClass}
                         onchange={({target}: {target: HTMLSelectElement}) => this.provider.setState(target.value)}
                     >
-                        {PROVIDERS.map(p =>
-                            p === this.provider.state
+                        {TRANSLATION_PROVIDERS.map(p =>
+                            p === provider
                                 ? <option value={p} selected>{p}</option>
                                 : <option value={p}>{p}</option>
                         )}
@@ -323,7 +342,7 @@ export class App extends Component {
 
                     <div class="flex items-center gap-2">
                         <select class={selectClass} onchange={this.onChangeFrom.bind(this)}>
-                            {LANGS.map(l =>
+                            {SOURCE_LANGS.map(l =>
                                 l === from
                                     ? <option value={l} selected>{LANG_LABELS[l]}</option>
                                     : <option value={l}>{LANG_LABELS[l]}</option>
@@ -339,7 +358,7 @@ export class App extends Component {
                         </button>
 
                         <select class={selectClass} onchange={this.onChangeTo.bind(this)}>
-                            {LANGS.map(l =>
+                            {TARGET_LANGS.map(l =>
                                 l === to
                                     ? <option value={l} selected>{LANG_LABELS[l]}</option>
                                     : <option value={l}>{LANG_LABELS[l]}</option>

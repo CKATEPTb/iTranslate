@@ -13,7 +13,12 @@ type LanguagePairSectionProps = {
     toStore: Store
 }
 
-const languages = ['en', 'ru', 'ua', 'de', 'fr']
+const sourceLanguages = ['auto', 'en', 'ru', 'ua', 'de', 'fr']
+const targetLanguages = ['en', 'ru', 'ua', 'de', 'fr']
+
+function getFallbackTargetLanguage(excluded: string): string {
+    return targetLanguages.find(language => language !== excluded) ?? targetLanguages[0]
+}
 
 export class LanguagePairSection extends Component<LanguagePairSectionProps> {
     onChangeFrom(event: Event) {
@@ -23,7 +28,7 @@ export class LanguagePairSection extends Component<LanguagePairSectionProps> {
 
         this.props.fromStore.setState(nextFrom)
         if (nextFrom == prevTo) {
-            this.props.toStore.setState(prevFrom)
+            this.props.toStore.setState(prevFrom === 'auto' ? getFallbackTargetLanguage(nextFrom) : prevFrom)
             this.update()
         }
     }
@@ -49,7 +54,7 @@ export class LanguagePairSection extends Component<LanguagePairSectionProps> {
                 <div class="grid grid-cols-2 gap-2">
                     <select onchange={this.onChangeFrom.bind(this)}
                             class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 pl-2 pr-6 py-2 text-slate-900 dark:text-slate-100">
-                        {languages.map(language => {
+                        {sourceLanguages.map(language => {
                             if (language == fromStore.state) {
                                 return <option value={language} selected>{language}</option>
                             }
@@ -58,7 +63,7 @@ export class LanguagePairSection extends Component<LanguagePairSectionProps> {
                     </select>
                     <select onchange={this.onChangeTo.bind(this)}
                             class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 pl-2 pr-6 py-2 text-slate-900 dark:text-slate-100">
-                        {languages.map(language => {
+                        {targetLanguages.map(language => {
                             if (language == toStore.state) {
                                 return <option value={language} selected>{language}</option>
                             }

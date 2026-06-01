@@ -7,6 +7,8 @@ import {LaraSettings} from "./providers/LaraSettings.tsx";
 import {MyMemorySettings} from "./providers/MyMemorySettings.tsx";
 import {OpenAISettings} from "./providers/OpenAISettings.tsx";
 import {
+    DeeplKeyStore,
+    LibreKeyStore,
     PopupThemeStore,
     ProviderStore,
     TranslateInputFromStore,
@@ -15,6 +17,13 @@ import {
     TranslateSelectToStore
 } from "../store.ts";
 import {LanguagePairSection} from "./components/LanguagePairSections.tsx";
+import {
+    DEFAULT_PROVIDER,
+    getPageTranslationSupport,
+    isKnownProvider,
+    normalizeProvider,
+    TRANSLATION_PROVIDERS
+} from '../providers.ts'
 
 type ChromeWithSidePanel = typeof chrome & {
     sidePanel: {
@@ -25,17 +34,39 @@ type ChromeWithSidePanel = typeof chrome & {
 type PageTranslationResponse = {
     ok: boolean
     enabled?: boolean
+    disabledBySite?: boolean
+    hostname?: string
+    never?: boolean
+    alwaysFrom?: string[]
     error?: string
 }
 
-const providers = new Map<string, () => Component>()
-providers.set('DeepL', () => <DeepLSettings/>)
-providers.set('Google', () => <GoogleSettings/>)
-providers.set('LibreTranslate', () => <LibreTranslateSettings/>)
-providers.set('Lingvanex', () => <LingvanexSettings/>)
-providers.set('Lara', () => <LaraSettings/>)
-providers.set('MyMemory', () => <MyMemorySettings/>)
-providers.set('OpenAI (Ollama)', () => <OpenAISettings/>)
+type PageTranslationMessage =
+    | { type: 'PAGE_TRANSLATION_GET_ACTIVE' }
+    | { type: 'PAGE_TRANSLATION_CLEAR_SITE_PREFERENCE'; hostname: string; action: 'never' | 'always-from'; language?: string }
+
+const PAGE_TRANSLATION_RESPONSE_TIMEOUT_MS = 4000
+const PAGE_TRANSLATION_LANGUAGE_NAMES: Record<string, string> = {
+    en: 'English',
+    ru: 'Russian',
+    ua: 'Ukrainian',
+    uk: 'Ukrainian',
+    de: 'German',
+    fr: 'French',
+}
+
+function getPageTranslationLanguageName(language: string): string {
+    return PAGE_TRANSLATION_LANGUAGE_NAMES[language.toLowerCase()] ?? language.toUpperCase()
+}
+
+const providerSettings = new Map<string, () => Component>()
+providerSettings.set('DeepL', () => <DeepLSettings/>)
+providerSettings.set('Google', () => <GoogleSettings/>)
+providerSettings.set('LibreTranslate', () => <LibreTranslateSettings/>)
+providerSettings.set('Lingvanex', () => <LingvanexSettings/>)
+providerSettings.set('Lara', () => <LaraSettings/>)
+providerSettings.set('MyMemory', () => <MyMemorySettings/>)
+providerSettings.set('OpenAI (Ollama)', () => <OpenAISettings/>)
 
 export class App extends Component {
     provider = ProviderStore.use()
@@ -44,8 +75,14 @@ export class App extends Component {
     translateInputFrom = TranslateInputFromStore.use()
     translateInputTo = TranslateInputToStore.use()
     theme = PopupThemeStore.use()
-    private pageTranslationEnabled = false
-    private pageTranslationBusy = false
+    deeplKey = DeeplKeyStore.use()
+    libreKey = LibreKeyStore.use()
+    private pageTranslationHostname = ''
+    private pageTranslationNever = false
+    private pageTranslationAlwaysFrom: string[] = []
+    private pageTranslationRulesOpen = false
+    private pageTranslationRulesBusy = false
+    private pageTranslationError = ''
 
     private applyTheme(theme: string) {
         if (theme === 'dark') {
@@ -63,6 +100,14 @@ export class App extends Component {
         this.applyTheme(next)
     }
 
+    private togglePageTranslationRules() {
+        this.pageTranslationRulesOpen = !this.pageTranslationRulesOpen
+        if (this.pageTranslationRulesOpen) {
+            void this.refreshPageTranslationState()
+        }
+        this.update()
+    }
+
     private async openSidePanel() {
         const currentWindow = await chrome.windows.getCurrent()
         if (currentWindow.id == null) return
@@ -71,34 +116,95 @@ export class App extends Component {
         window.close()
     }
 
+    private sendPageTranslationMessage(message: PageTranslationMessage): Promise<PageTranslationResponse> {
+        return new Promise(resolve => {
+            let settled = false
+            let timeoutId: number | undefined
+            const finish = (response: PageTranslationResponse) => {
+                if (settled) return
+                settled = true
+                if (timeoutId !== undefined) {
+                    window.clearTimeout(timeoutId)
+                }
+                resolve(response)
+            }
+            timeoutId = window.setTimeout(() => {
+                finish({ok: false, error: 'Timed out waiting for extension background'})
+            }, PAGE_TRANSLATION_RESPONSE_TIMEOUT_MS)
+
+            try {
+                chrome.runtime.sendMessage(message, (response?: PageTranslationResponse) => {
+                    const error = chrome.runtime.lastError
+                    if (error) {
+                        finish({ok: false, error: error.message})
+                        return
+                    }
+                    finish(response ?? {ok: false, error: 'No response from extension background'})
+                })
+            } catch (error) {
+                finish({
+                    ok: false,
+                    error: error instanceof Error ? error.message : 'Failed to contact extension background'
+                })
+            }
+        })
+    }
+
     private async refreshPageTranslationState() {
-        try {
-            const response = await chrome.runtime.sendMessage({
-                type: 'PAGE_TRANSLATION_GET_ACTIVE'
-            }) as PageTranslationResponse
-            this.pageTranslationEnabled = !!(response.ok && response.enabled)
-        } catch {
-            this.pageTranslationEnabled = false
+        const response = await this.sendPageTranslationMessage({type: 'PAGE_TRANSLATION_GET_ACTIVE'})
+        if (response.ok) {
+            this.pageTranslationHostname = response.hostname ?? ''
+            this.pageTranslationNever = response.never === true
+            this.pageTranslationAlwaysFrom = response.alwaysFrom ?? []
+            this.pageTranslationError = ''
         }
         this.update()
     }
 
-    private async togglePageTranslation() {
-        if (this.pageTranslationBusy) return
+    private async clearPageTranslationRule(action: 'never' | 'always-from', language?: string) {
+        if (this.pageTranslationRulesBusy || (action === 'never' && !this.pageTranslationHostname)) return
 
-        this.pageTranslationBusy = true
+        this.pageTranslationRulesBusy = true
+        this.pageTranslationError = ''
         this.update()
         try {
-            const response = await chrome.runtime.sendMessage({
-                type: 'PAGE_TRANSLATION_SET_ACTIVE',
-                enabled: !this.pageTranslationEnabled
-            }) as PageTranslationResponse
+            const response = await this.sendPageTranslationMessage({
+                type: 'PAGE_TRANSLATION_CLEAR_SITE_PREFERENCE',
+                hostname: this.pageTranslationHostname,
+                action,
+                language,
+            })
             if (response.ok) {
-                this.pageTranslationEnabled = !!response.enabled
+                this.pageTranslationHostname = response.hostname ?? this.pageTranslationHostname
+                this.pageTranslationNever = response.never === true
+                this.pageTranslationAlwaysFrom = response.alwaysFrom ?? []
+            } else {
+                this.pageTranslationError = response.error ?? 'Failed to update page translation rules'
             }
         } finally {
-            this.pageTranslationBusy = false
+            this.pageTranslationRulesBusy = false
             this.update()
+        }
+    }
+
+    private setProvider(value: string) {
+        const provider = normalizeProvider(value)
+        this.provider.setState(provider)
+
+        this.pageTranslationError = ''
+        void this.refreshPageTranslationState()
+    }
+
+    private ensureKnownProvider() {
+        if (!isKnownProvider(this.provider.state)) {
+            this.provider.setState(DEFAULT_PROVIDER)
+        }
+    }
+
+    private getPageTranslationSettings(): Record<string, unknown> {
+        return {
+            'deepl-key': this.deeplKey.state,
+            'libre-key': this.libreKey.state,
         }
     }
 
@@ -108,6 +214,9 @@ export class App extends Component {
         }
         this.provider.subscribe(update)
         this.theme.subscribe(update)
+        this.deeplKey.subscribe(update)
+        this.libreKey.subscribe(update)
+        this.ensureKnownProvider()
         this.applyTheme(this.theme.state as string)
         void this.refreshPageTranslationState()
     }
@@ -115,17 +224,131 @@ export class App extends Component {
     didUnmount(): any {
         this.provider.cancel()
         this.theme.cancel()
+        this.deeplKey.cancel()
+        this.libreKey.cancel()
     }
 
     render() {
         const isDark = (this.theme.state as string) === 'dark'
-        const pageTranslationEnabled = this.pageTranslationEnabled
-        const pageTranslationBusy = this.pageTranslationBusy
+        const provider = normalizeProvider(this.provider.state)
+        const pageTranslationSupport = getPageTranslationSupport(provider, this.getPageTranslationSettings())
+        const providerSupportsPageTranslation = pageTranslationSupport.supported
+        const pageTranslationBadgeText = providerSupportsPageTranslation
+            ? 'Page ready'
+            : pageTranslationSupport.requiresApiKey
+                ? 'API key needed'
+                : 'Selection only'
+        const pageTranslationStatusText = providerSupportsPageTranslation
+            ? pageTranslationSupport.requiredSetting
+                ? 'Page translation uses this provider API key.'
+                : 'Page translation is available for this provider.'
+            : pageTranslationSupport.requiresApiKey
+                ? 'Add an API key to enable page translation.'
+                : 'Page translation is unavailable for this provider.'
+        const pageTranslationBadgeClass = providerSupportsPageTranslation
+            ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+            : pageTranslationSupport.requiresApiKey
+                ? 'border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300'
+                : 'border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-950 text-slate-500 dark:text-slate-400'
+        const pageTranslationDotClass = providerSupportsPageTranslation
+            ? 'bg-emerald-500'
+            : pageTranslationSupport.requiresApiKey
+                ? 'bg-amber-500'
+                : 'bg-slate-400'
+        const pageTranslationStatusClass = providerSupportsPageTranslation
+            ? 'text-emerald-600 dark:text-emerald-300'
+            : pageTranslationSupport.requiresApiKey
+                ? 'text-amber-600 dark:text-amber-300'
+                : 'text-slate-400 dark:text-slate-500'
+        const pageTranslationHostname = this.pageTranslationHostname
+        const pageTranslationNever = this.pageTranslationNever
+        const pageTranslationAlwaysFrom = this.pageTranslationAlwaysFrom
+        const pageTranslationCanShowSiteRules = pageTranslationHostname.length > 0
+        const pageTranslationHasSiteRule = pageTranslationCanShowSiteRules && pageTranslationNever
+        const pageTranslationHasLanguageRules = pageTranslationAlwaysFrom.length > 0
+        const pageTranslationHasRules = pageTranslationHasSiteRule || pageTranslationHasLanguageRules
+        const pageTranslationRulesOpen = this.pageTranslationRulesOpen
+        const pageTranslationRulesBusy = this.pageTranslationRulesBusy
+        const pageTranslationError = this.pageTranslationError
 
-        const iconBtn = 'inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-500 dark:text-slate-200 transition hover:border-slate-400 dark:hover:border-slate-500 hover:text-slate-900 dark:hover:text-white focus:outline-none focus:ring-2 focus:ring-slate-500/60'
-        const toggleTrack = `relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full border transition focus:outline-none focus:ring-2 focus:ring-slate-500/60 ${pageTranslationEnabled ? 'border-blue-500 bg-blue-600' : 'border-slate-200 dark:border-slate-700 bg-slate-200 dark:bg-slate-800'} ${pageTranslationBusy ? 'opacity-60' : ''}`
-        const toggleThumb = `h-5 w-5 rounded-full bg-white shadow-sm transition ${pageTranslationEnabled ? 'translate-x-5' : 'translate-x-0.5'}`
+        const iconBtn = 'relative inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-slate-500 dark:text-slate-200 transition hover:border-slate-400 dark:hover:border-slate-500 hover:text-slate-900 dark:hover:text-white focus:outline-none focus:ring-2 focus:ring-slate-500/60'
+        const activeIconBtn = `${iconBtn} border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/40`
         const spinnerClass = 'inline-block h-3 w-3 animate-spin rounded-full border-2 border-current border-r-transparent'
+        const removeRuleButtonClass = 'inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-300 transition hover:border-red-300 dark:hover:border-red-700 hover:text-red-600 dark:hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-slate-500/60'
+        const pageTranslationRulesSection = pageTranslationRulesOpen
+            ? (
+                <section class="grid gap-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/70 p-3">
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="text-slate-500 dark:text-slate-300">Page translation rules</span>
+                        {pageTranslationRulesBusy && <span class={spinnerClass}></span>}
+                    </div>
+                    {pageTranslationCanShowSiteRules && (
+                        <div class="min-w-0 truncate text-[11px] text-slate-400 dark:text-slate-500">
+                            Site: {pageTranslationHostname}
+                        </div>
+                    )}
+                    <div class="grid gap-2">
+                        <div class="grid gap-1">
+                            <div class="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                                This site
+                            </div>
+                            {!pageTranslationCanShowSiteRules && (
+                                <div class="rounded-lg bg-white/70 dark:bg-slate-900/80 px-2 py-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                    Site rules are unavailable on this page
+                                </div>
+                            )}
+                            {pageTranslationCanShowSiteRules && !pageTranslationNever && (
+                                <div class="rounded-lg bg-white/70 dark:bg-slate-900/80 px-2 py-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                    No site rule
+                                </div>
+                            )}
+                            {pageTranslationCanShowSiteRules && pageTranslationNever && (
+                                <div class="flex items-center justify-between gap-2 rounded-lg bg-white/70 dark:bg-slate-900/80 px-2 py-1.5">
+                                    <span class="min-w-0 truncate text-[11px] text-slate-600 dark:text-slate-300">
+                                        Never translate this site
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onclick={() => void this.clearPageTranslationRule('never')}
+                                        class={removeRuleButtonClass}
+                                        title="Remove rule"
+                                        aria-label="Remove never translate rule"
+                                    >
+                                        x
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                        <div class="grid gap-1">
+                            <div class="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                                All sites
+                            </div>
+                            {!pageTranslationHasLanguageRules && (
+                                <div class="rounded-lg bg-white/70 dark:bg-slate-900/80 px-2 py-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                    No language rules
+                                </div>
+                            )}
+                            {pageTranslationAlwaysFrom.map(language => (
+                                <div class="flex items-center justify-between gap-2 rounded-lg bg-white/70 dark:bg-slate-900/80 px-2 py-1.5">
+                                    <span class="min-w-0 truncate text-[11px] text-slate-600 dark:text-slate-300">
+                                        Always translate from {getPageTranslationLanguageName(language)}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onclick={() => void this.clearPageTranslationRule('always-from', language)}
+                                        class={removeRuleButtonClass}
+                                        title="Remove rule"
+                                        aria-label={`Remove always translate from ${getPageTranslationLanguageName(language)} rule`}
+                                    >
+                                        x
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </section>
+            )
+            : null
 
         return (
             <main class="w-95 p-4 text-slate-900 dark:text-slate-100 bg-linear-to-br from-slate-100 via-white to-slate-100 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
@@ -144,6 +367,25 @@ export class App extends Component {
                                     <path d="M7 8h4"></path>
                                     <path d="M7 12h4"></path>
                                 </svg>
+                            </button>
+                            <button
+                                onclick={() => this.togglePageTranslationRules()}
+                                class={pageTranslationRulesOpen ? activeIconBtn : iconBtn}
+                                title="Page translation rules"
+                                aria-label="Page translation rules"
+                                aria-expanded={pageTranslationRulesOpen ? 'true' : 'false'}
+                            >
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                                    <path d="M4 7h10"></path>
+                                    <path d="M18 7h2"></path>
+                                    <circle cx="16" cy="7" r="2"></circle>
+                                    <path d="M4 17h2"></path>
+                                    <path d="M10 17h10"></path>
+                                    <circle cx="8" cy="17" r="2"></circle>
+                                </svg>
+                                {pageTranslationHasRules && (
+                                    <span class="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-white dark:border-slate-950 bg-blue-500"></span>
+                                )}
                             </button>
                             <button
                                 onclick={() => this.toggleTheme()}
@@ -183,19 +425,33 @@ export class App extends Component {
                     </div>
 
                     <section class="mt-4 grid gap-3 text-xs">
-                        <label class="grid gap-1">
-                            <span class="text-slate-500 dark:text-slate-300">Translator</span>
+                        {pageTranslationRulesSection}
+
+                        <label class="grid gap-1.5">
+                            <span class="flex items-center justify-between gap-2">
+                                <span class="text-slate-500 dark:text-slate-300">Translator</span>
+                                <span
+                                    class={`inline-flex max-w-[160px] items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium ${pageTranslationBadgeClass}`}
+                                    title={pageTranslationStatusText}
+                                >
+                                    <span class={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${pageTranslationDotClass}`}></span>
+                                    <span class="truncate">{pageTranslationBadgeText}</span>
+                                </span>
+                            </span>
                             <select
-                                onchange={({target}: {target: HTMLSelectElement}) => this.provider.setState(target.value)}
+                                onchange={({target}: {target: HTMLSelectElement}) => this.setProvider(target.value)}
                                 class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 pl-2 pr-6 py-2 text-slate-900 dark:text-slate-100"
                             >
-                                {Array.from(providers.keys()).map(value => {
-                                    if (value == this.provider.state) {
+                                {TRANSLATION_PROVIDERS.map(value => {
+                                    if (value == provider) {
                                         return <option value={value} selected>{value}</option>
                                     }
                                     return <option value={value}>{value}</option>
                                 })}
                             </select>
+                            <span class={`text-[11px] ${pageTranslationStatusClass}`}>
+                                {pageTranslationStatusText}
+                            </span>
                         </label>
 
                         <LanguagePairSection
@@ -209,29 +465,13 @@ export class App extends Component {
                             toStore={this.translateInputTo}
                         />
 
-                        <button
-                            type="button"
-                            aria-pressed={pageTranslationEnabled}
-                            aria-disabled={pageTranslationBusy}
-                            onclick={() => void this.togglePageTranslation()}
-                            class={`flex w-full items-center justify-between rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950/70 p-3 text-left transition hover:border-blue-400 dark:hover:border-blue-500 focus:outline-none focus:ring-2 focus:ring-slate-500/60 ${pageTranslationBusy ? 'cursor-wait opacity-70' : ''}`}
-                            title={pageTranslationEnabled ? 'Disable page translation' : 'Enable page translation'}
-                        >
-                            <span class="grid gap-1 text-slate-500 dark:text-slate-300">
-                                <span>Translate page</span>
-                                {pageTranslationBusy && (
-                                    <span class="inline-flex items-center gap-1.5 text-[11px] text-blue-500 dark:text-blue-400">
-                                        <span class={spinnerClass}></span>
-                                        <span>Please wait...</span>
-                                    </span>
-                                )}
-                            </span>
-                            <span class={toggleTrack}>
-                                <span class={toggleThumb}></span>
-                            </span>
-                        </button>
+                        {pageTranslationError && (
+                            <p class="rounded-lg border border-red-200 dark:border-red-900/70 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-[11px] text-red-600 dark:text-red-300">
+                                {pageTranslationError}
+                            </p>
+                        )}
 
-                        {providers.get(this.provider.state)}
+                        {providerSettings.get(provider)?.()}
                     </section>
                 </div>
             </main>
