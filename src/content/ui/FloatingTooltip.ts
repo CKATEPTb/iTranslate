@@ -1,4 +1,4 @@
-import {autoUpdate, computePosition, flip, offset, shift, type VirtualElement} from '@floating-ui/dom'
+import {autoUpdateFloatingPosition, type FloatingReference} from './floatingPosition'
 
 export type TooltipOwner = 'selection' | 'page-original'
 
@@ -12,7 +12,6 @@ export type TooltipController = {
 }
 
 const TOOLTIP_ID = 'itranslate-tooltip'
-const MIDDLEWARE = [offset(10), flip({padding: 8}), shift({padding: 8})]
 
 const TOOLTIP_THEMES = {
     dark: {
@@ -235,15 +234,11 @@ export class FloatingTooltip implements TooltipController {
         this.el.style.display = 'block'
         this.stop()
 
-        const ref: VirtualElement = {getBoundingClientRect: getRect, contextElement: document.documentElement}
-        this.cleanup = autoUpdate(ref, this.el, async () => {
-            const {x, y} = await computePosition(ref, this.el, {
-                strategy: 'fixed',
-                placement: 'top',
-                middleware: MIDDLEWARE
-            })
-            this.el.style.left = `${x}px`
-            this.el.style.top = `${y}px`
+        const ref: FloatingReference = {getBoundingClientRect: getRect, contextElement: document.documentElement}
+        this.cleanup = autoUpdateFloatingPosition(ref, this.el, {
+            placement: 'top',
+            offset: 10,
+            padding: 8,
         })
     }
 }
