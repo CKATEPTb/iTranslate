@@ -2,7 +2,34 @@
 
 iTranslate is a Chromium extension for fast text and page translation. It can translate selected text, focused input fields, the side panel text box, and full web pages with configurable translation providers.
 
-Version: 1.4.0
+Version: 1.4.3
+
+## Release Notes
+
+### 1.4.3
+
+- Made one-time page translation document-scoped, so clicking Translate page no longer persists across full page reloads.
+- Clear legacy persisted tab translation state from older builds instead of restoring it after navigation.
+- Keep one-time page translation active across same-document page updates, including SPA-style content changes.
+- Keep automatic page translation tied to explicit always-translate language rules.
+- Split page translation runtime state, DOM scanning, visibility tracking, prompts, status indicators, diagnostics, and contracts into dedicated modules.
+- Reduced background bundle size by moving DeepL internals into a lazy translator chunk.
+- Verified visible-only page translation, dynamic content updates, and reload behavior with browser E2E coverage.
+
+### 1.4.2
+
+- Improved page translation prompts, provider support indicators, rule management, and original-text/error tooltips.
+- Added automatic page-translation suggestions based on visible language mismatch.
+- Added continued translation for changed page content, placeholders, open shadow roots, and accessible frames.
+
+### 1.4.1
+
+- Reduced the extension bundle by removing the Floating UI runtime dependency and using a small local floating-position helper.
+- Simplified Free DeepL translation code while preserving the unauthenticated DeepL flow.
+- Split page translation UI responsibilities into dedicated controllers for prompts, original-text tooltips, and per-text translation status indicators.
+- Moved page-translation suggestion scheduling and mutation watching into a dedicated watcher controller.
+- Kept page translation behavior focused on visible text, placeholders, page updates, iframes, and duplicate-content avoidance.
+- Trimmed generated CSS by importing only the Tailwind layers used by the extension.
 
 ## Highlights
 
@@ -132,6 +159,17 @@ npm run check
 ```
 
 The built extension is written to `dist/`.
+
+## Publish Release
+
+Releases are published by the GitHub workflow when a version tag is pushed:
+
+```bash
+git tag v1.4.3
+git push origin v1.4.3
+```
+
+The workflow installs dependencies with `npm ci`, runs `npm run check`, packages `dist/` as `iTranslate.zip`, and attaches it to the GitHub release.
 
 ## Privacy
 

@@ -2,7 +2,7 @@
   "name": "itranslate",
   "author": "CKATEPTb",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.4.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -19,9 +19,6 @@
     "tailwindcss": "^4.2.1",
     "typescript": "~5.9.3",
     "vite": "^7.3.1"
-  },
-  "dependencies": {
-    "@floating-ui/dom": "^1.7.6"
   },
   "packageManager": "npm@11.11.0"
 }

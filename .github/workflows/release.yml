@@ -2,8 +2,8 @@ name: Release iTranslate
 
 on:
   push:
-    branches:
-      - production
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -18,18 +18,16 @@ jobs:
         node-version: [ 22 ]
     steps:
       - uses: actions/checkout@v4
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           registry-url: 'https://registry.npmjs.org/'
-          cache: 'pnpm'
+          cache: 'npm'
       - name: Install dependencies
-        run: pnpm install
+        run: npm ci
       - name: Build package
-        run: pnpm build
+        run: npm run check
       - name: Rename dist to iTranslate
         run: mv dist iTranslate
       - name: Create archive
