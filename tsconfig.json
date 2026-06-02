@@ -12,7 +12,8 @@
     "baseUrl": ".",
     "paths": {
       "#mini-jsx": ["src/ui/mini-jsx/index.ts"],
-      "#mini-jsx/jsx-runtime": ["src/ui/mini-jsx/jsx-runtime.ts"]
+      "#mini-jsx/jsx-runtime": ["src/ui/mini-jsx/jsx-runtime.ts"],
+      "#mini-jsx/jsx-dev-runtime": ["src/ui/mini-jsx/jsx-dev-runtime.ts"]
     },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
