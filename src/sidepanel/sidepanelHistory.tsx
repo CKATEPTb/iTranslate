@@ -1,4 +1,5 @@
 import {LANG_LABELS, type HistoryEntry, type LangCode} from './sidepanelModel.ts'
+import {ChevronDownIcon, ChevronRightIcon, TrashIcon} from './sidepanelIcons.tsx'
 
 type HistoryPanelProps = {
     entries: HistoryEntry[]
@@ -13,21 +14,29 @@ type HistoryPanelProps = {
 export function HistoryPanel({entries, show, formatTime, onClear, onDelete, onLoad, onToggle}: HistoryPanelProps) {
     return (
         <>
-            <div class="flex items-center gap-2 flex-shrink-0">
+            <div class="flex items-center justify-between gap-2 flex-shrink-0">
                 <button
                     onclick={() => onToggle()}
-                    class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition"
+                    class="group inline-flex h-8 min-w-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400 dark:hover:border-blue-500 dark:hover:text-blue-400"
+                    title={show ? 'Hide history' : 'Show history'}
+                    aria-label={show ? 'Hide history' : 'Show history'}
                 >
-                    <span>{show ? 'v' : '>'}</span>
-                    <span>History ({entries.length})</span>
+                    <span class="flex h-4 w-4 items-center justify-center text-slate-400 transition group-hover:text-blue-500 dark:group-hover:text-blue-400">
+                        {show ? <ChevronDownIcon size={13}/> : <ChevronRightIcon size={13}/>}
+                    </span>
+                    <span class="truncate">History</span>
+                    <span class="min-w-4 rounded-full bg-slate-100 px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                        {entries.length}
+                    </span>
                 </button>
                 {entries.length > 0 && (
                     <button
                         onclick={() => onClear()}
-                        class="text-xs text-red-400 hover:text-red-500 transition ml-1"
+                        class="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:border-red-300 hover:text-red-500 focus:outline-none focus:ring-2 focus:ring-red-500/30 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400 dark:hover:border-red-500/60 dark:hover:text-red-400"
                         title="Clear history"
+                        aria-label="Clear history"
                     >
-                        Clear
+                        <TrashIcon size={14}/>
                     </button>
                 )}
             </div>
@@ -75,10 +84,11 @@ function HistoryCard({entry, formatTime, onDelete, onLoad}: HistoryCardProps) {
                         event.stopPropagation()
                         onDelete(entry.id)
                     }}
-                    class="flex-shrink-0 text-slate-300 dark:text-slate-600 hover:text-red-400 dark:hover:text-red-400 transition leading-none"
+                    class="inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md border border-transparent text-slate-300 transition hover:border-red-200 hover:bg-red-50 hover:text-red-500 focus:outline-none focus:ring-2 focus:ring-red-500/30 dark:text-slate-600 dark:hover:border-red-500/40 dark:hover:bg-red-950/30 dark:hover:text-red-400"
                     title="Delete"
+                    aria-label="Delete history entry"
                 >
-                    x
+                    <TrashIcon size={12}/>
                 </button>
             </div>
             <p class="text-xs text-slate-500 dark:text-slate-400 truncate">{entry.source}</p>
