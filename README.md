@@ -162,14 +162,15 @@ The built extension is written to `dist/`.
 
 ## Publish Release
 
-Releases are published by the GitHub workflow when a version tag is pushed:
+Releases are published by the GitHub workflow when changes land in the `production` branch:
 
 ```bash
-git tag v1.4.3
-git push origin v1.4.3
+git checkout production
+git merge development
+git push origin production
 ```
 
-The workflow installs dependencies with `npm ci`, runs `npm run check`, packages `dist/` as `iTranslate.zip`, and attaches it to the GitHub release.
+The workflow installs dependencies with `npm ci`, runs `npm run check`, packages `dist/` as `iTranslate.zip`, and attaches it to a GitHub release named from `package.json` version.
 
 ## Privacy
 
