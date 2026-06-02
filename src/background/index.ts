@@ -1,5 +1,7 @@
-import {read} from '../store.ts'
+import {readConfig, SYNC_CONFIG_KEY} from '../storageConfig.ts'
 import {getTranslator} from './translator'
+import type {TranslateContext, Translator} from './translator/types.ts'
+import {splitTranslationText} from './translationChunks.ts'
 import {normalizeProvider, supportsPageTranslation} from '../providers.ts'
 import {detectTextLanguage, isTextLikelyLanguage, type DetectableLanguage} from '../languageDetection.ts'
 
@@ -66,6 +68,18 @@ type PageTranslationAnalyzeSamplesMessage = {
   documentLanguage?: string
 }
 
+type RuntimeMessage =
+  | TranslateRequestMessage
+  | TranslatePrecheckMessage
+  | SidePanelTranslateMessage
+  | PageTranslationGetActiveMessage
+  | PageTranslationSetActiveMessage
+  | PageTranslationGetStateMessage
+  | PageTranslationSuggestSettingsMessage
+  | PageTranslationSetSitePreferenceMessage
+  | PageTranslationClearSitePreferenceMessage
+  | PageTranslationAnalyzeSamplesMessage
+
 type PageTranslationSitePreference = {
   never?: boolean
   alwaysFrom?: Record<string, boolean>
@@ -98,12 +112,46 @@ type TranslatePrecheckResult = {
   skipped: boolean
 }
 
+type SendResponse = (response?: unknown) => void
+
 const PAGE_TRANSLATION_TABS_KEY = 'itranslate-page-translation-tabs'
 const PAGE_TRANSLATION_PREFS_KEY = 'itranslate-page-translation-prefs'
 const PAGE_TRANSLATION_GLOBAL_PREFS_KEY = 'itranslate-page-translation-global-prefs'
 const PAGE_TRANSLATION_ANALYSIS_MIN_WEIGHT = 160
 const PROVIDERS_WITH_NATIVE_AUTO_SOURCE = new Set(['Google', 'DeepL', 'LibreTranslate', 'Lara', 'OpenAI (Ollama)'])
 const pageTranslationTabs = new Map<number, PageTranslationTabSession>()
+const translatorCache = new Map<string, Translator>()
+
+type ExtensionSettings = Awaited<ReturnType<typeof readConfig>>
+
+let settingsCache: ExtensionSettings | null = null
+let settingsCachePromise: Promise<ExtensionSettings> | null = null
+
+function invalidateSettingsCache() {
+  settingsCache = null
+  settingsCachePromise = null
+}
+
+async function readSettings(): Promise<ExtensionSettings> {
+  if (settingsCache) return settingsCache
+
+  settingsCachePromise ??= readConfig()
+    .then((settings) => {
+      settingsCache = settings
+      return settings
+    })
+    .finally(() => {
+      settingsCachePromise = null
+    })
+
+  return settingsCachePromise
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'sync' && changes[SYNC_CONFIG_KEY]) {
+    invalidateSettingsCache()
+  }
+})
 const LANGUAGE_ALIASES: Record<string, DetectableLanguage> = {
   eng: 'en',
   en: 'en',
@@ -164,8 +212,34 @@ function normalizeDetectableLanguage(language: string): DetectableLanguage | nul
 }
 
 function getLanguageSampleWeight(text: string): number {
-  const letters = Array.from(text.matchAll(/\p{L}/gu)).length
-  return Math.min(letters, 700)
+  const letterPattern = /\p{L}/gu
+  let letters = 0
+  while (letters < 700 && letterPattern.exec(text)) {
+    letters++
+  }
+  return letters
+}
+
+function getCachedTranslator(provider: string): Translator {
+  let translator = translatorCache.get(provider)
+  if (!translator) {
+    translator = getTranslator(provider)
+    translatorCache.set(provider, translator)
+  }
+  return translator
+}
+
+async function translateWithProvider(provider: string, context: TranslateContext): Promise<string> {
+  const chunks = splitTranslationText(context.text)
+  const translator = getCachedTranslator(provider)
+  if (chunks.length === 1) return translator.translate(context)
+
+  const translatedChunks: string[] = []
+  for (const chunk of chunks) {
+    translatedChunks.push(chunk.trim() ? await translator.translate({...context, text: chunk}) : chunk)
+  }
+
+  return translatedChunks.join('')
 }
 
 function getHostnameFromUrl(url: string | undefined): string {
@@ -214,6 +288,26 @@ function serializePageTranslationTabSession(session: PageTranslationTabSession):
       ...(session.hostname ? {hostname: session.hostname} : {}),
     }
     : true
+}
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback
+}
+
+function sendErrorResponse(sendResponse: SendResponse, error: unknown, fallback: string): void {
+  sendResponse({ok: false, error: getErrorMessage(error, fallback)})
+}
+
+function sendPromiseResponse<T>(
+  sendResponse: SendResponse,
+  promise: Promise<T>,
+  mapResult: (result: T) => unknown,
+  errorFallback: string,
+): true {
+  promise
+    .then((result) => sendResponse(mapResult(result)))
+    .catch((error: unknown) => sendErrorResponse(sendResponse, error, errorFallback))
+  return true
 }
 
 async function readPageTranslationTabs(): Promise<Record<string, StoredPageTranslationTabSession>> {
@@ -315,7 +409,7 @@ async function disablePageTranslationForTab(tabId: number) {
 }
 
 async function getPageTranslationTabSession(tabId: number, tab?: chrome.tabs.Tab): Promise<PageTranslationTabSession | null> {
-  const settings = await read()
+  const settings = await readSettings()
   if (!supportsPageTranslation(settings.provider, settings)) {
     await disablePageTranslationForTab(tabId)
     return null
@@ -362,7 +456,7 @@ function resolveSourceLanguage(text: string, requestedSource: string, provider: 
 }
 
 async function translateText(request: TranslateRequestMessage): Promise<TranslateTextResult> {
-  const settings = await read()
+  const settings = await readSettings()
   if (request.mode === 'page' && !supportsPageTranslation(settings.provider, settings)) {
     throw new Error(`${normalizeProvider(settings.provider)} cannot be used for page translation`)
   }
@@ -380,7 +474,7 @@ async function translateText(request: TranslateRequestMessage): Promise<Translat
   }
 
   const source = resolveSourceLanguage(request.text, requestedSource, provider)
-  const translatedText = await getTranslator(provider).translate({
+  const translatedText = await translateWithProvider(provider, {
     text: request.text,
     from: source,
     to: target,
@@ -390,7 +484,7 @@ async function translateText(request: TranslateRequestMessage): Promise<Translat
 }
 
 async function precheckTranslateText(request: TranslatePrecheckMessage): Promise<TranslatePrecheckResult> {
-  const settings = await read()
+  const settings = await readSettings()
   if (request.mode === 'page' && !supportsPageTranslation(settings.provider, settings)) {
     throw new Error(`${normalizeProvider(settings.provider)} cannot be used for page translation`)
   }
@@ -400,12 +494,12 @@ async function precheckTranslateText(request: TranslatePrecheckMessage): Promise
 }
 
 async function translateSidePanel(request: SidePanelTranslateMessage): Promise<string> {
-  const settings = await read()
+  const settings = await readSettings()
   if (isTextLikelyLanguage(request.text, request.to)) return request.text
 
   const provider = normalizeProvider(request.provider)
   const source = resolveSourceLanguage(request.text, request.from, provider)
-  return getTranslator(provider).translate({
+  return translateWithProvider(provider, {
     text: request.text,
     from: source,
     to: request.to,
@@ -433,7 +527,7 @@ async function getActivePageTranslationState() {
     }
   }
 
-  const settings = await read()
+  const settings = await readSettings()
   const supported = supportsPageTranslation(settings.provider, settings)
   const hostname = getHostnameFromUrl(tab.url)
   const preference = hostname ? await getPageTranslationSitePreference(hostname) : {}
@@ -463,7 +557,7 @@ async function setPageTranslationStateForTab(tab: chrome.tabs.Tab, enabled: bool
   }
 
   if (enabled) {
-    const settings = await read()
+    const settings = await readSettings()
     if (!supportsPageTranslation(settings.provider, settings)) {
       throw new Error(`${normalizeProvider(settings.provider)} cannot be used for page translation`)
     }
@@ -515,7 +609,7 @@ async function setActivePageTranslationState(request: PageTranslationSetActiveMe
 }
 
 async function getPageTranslationSuggestSettings(request: PageTranslationSuggestSettingsMessage) {
-  const settings = await read()
+  const settings = await readSettings()
   const hostname = normalizeSiteHostname(request.hostname)
   const provider = normalizeProvider(settings.provider)
   const preference = hostname ? await getPageTranslationSitePreference(hostname) : {}
@@ -666,7 +760,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     return
   }
 
-  const typed: any = message as Partial<TranslateRequestMessage & TranslatePrecheckMessage & SidePanelTranslateMessage & PageTranslationGetActiveMessage & PageTranslationSetActiveMessage & PageTranslationGetStateMessage & PageTranslationSuggestSettingsMessage & PageTranslationSetSitePreferenceMessage & PageTranslationClearSitePreferenceMessage & PageTranslationAnalyzeSamplesMessage>
+  const typed = message as Partial<RuntimeMessage>
 
   if (typed.type === 'PAGE_TRANSLATION_GET_STATE') {
     const tab = sender.tab
@@ -676,43 +770,39 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       return
     }
 
-    getPageTranslationTabSession(tabId, tab)
-      .then((session) => sendResponse({ok: true, enabled: !!session, sourceLanguage: session?.sourceLanguage}))
-      .catch((error: unknown) => {
-        const messageText = error instanceof Error ? error.message : 'Unknown page translation error'
-        sendResponse({ok: false, error: messageText})
-      })
-    return true
+    return sendPromiseResponse(
+      sendResponse,
+      getPageTranslationTabSession(tabId, tab),
+      (session) => ({ok: true, enabled: !!session, sourceLanguage: session?.sourceLanguage}),
+      'Unknown page translation error',
+    )
   }
 
   if (typed.type === 'PAGE_TRANSLATION_GET_ACTIVE') {
-    getActivePageTranslationState()
-      .then((state) => sendResponse({ok: true, ...state}))
-      .catch((error: unknown) => {
-        const messageText = error instanceof Error ? error.message : 'Unknown page translation error'
-        sendResponse({ok: false, error: messageText})
-      })
-    return true
+    return sendPromiseResponse(
+      sendResponse,
+      getActivePageTranslationState(),
+      (state) => ({ok: true, ...state}),
+      'Unknown page translation error',
+    )
   }
 
   if (typed.type === 'PAGE_TRANSLATION_SET_ACTIVE' && typeof typed.enabled === 'boolean') {
-    setActivePageTranslationState(typed as PageTranslationSetActiveMessage, sender.tab)
-      .then((enabled) => sendResponse({ok: true, enabled}))
-      .catch((error: unknown) => {
-        const messageText = error instanceof Error ? error.message : 'Unknown page translation error'
-        sendResponse({ok: false, error: messageText})
-      })
-    return true
+    return sendPromiseResponse(
+      sendResponse,
+      setActivePageTranslationState(typed as PageTranslationSetActiveMessage, sender.tab),
+      (enabled) => ({ok: true, enabled}),
+      'Unknown page translation error',
+    )
   }
 
   if (typed.type === 'PAGE_TRANSLATION_SUGGEST_SETTINGS' && typeof typed.hostname === 'string') {
-    getPageTranslationSuggestSettings(typed as PageTranslationSuggestSettingsMessage)
-      .then((settings) => sendResponse({ok: true, ...settings}))
-      .catch((error: unknown) => {
-        const messageText = error instanceof Error ? error.message : 'Unknown page translation error'
-        sendResponse({ok: false, error: messageText})
-      })
-    return true
+    return sendPromiseResponse(
+      sendResponse,
+      getPageTranslationSuggestSettings(typed as PageTranslationSuggestSettingsMessage),
+      (settings) => ({ok: true, ...settings}),
+      'Unknown page translation error',
+    )
   }
 
   if (
@@ -720,13 +810,12 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     typeof typed.hostname === 'string' &&
     (typed.action === 'never' || typed.action === 'always-from')
   ) {
-    setPageTranslationSitePreference(typed as PageTranslationSetSitePreferenceMessage, sender.tab)
-      .then((preference) => sendResponse({ok: true, ...preference}))
-      .catch((error: unknown) => {
-        const messageText = error instanceof Error ? error.message : 'Unknown page translation error'
-        sendResponse({ok: false, error: messageText})
-      })
-    return true
+    return sendPromiseResponse(
+      sendResponse,
+      setPageTranslationSitePreference(typed as PageTranslationSetSitePreferenceMessage, sender.tab),
+      (preference) => ({ok: true, ...preference}),
+      'Unknown page translation error',
+    )
   }
 
   if (
@@ -734,43 +823,39 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     typeof typed.hostname === 'string' &&
     (typed.action === 'never' || typed.action === 'always-from')
   ) {
-    clearPageTranslationSitePreference(typed as PageTranslationClearSitePreferenceMessage)
-      .then((preference) => sendResponse({ok: true, ...preference}))
-      .catch((error: unknown) => {
-        const messageText = error instanceof Error ? error.message : 'Unknown page translation error'
-        sendResponse({ok: false, error: messageText})
-      })
-    return true
+    return sendPromiseResponse(
+      sendResponse,
+      clearPageTranslationSitePreference(typed as PageTranslationClearSitePreferenceMessage),
+      (preference) => ({ok: true, ...preference}),
+      'Unknown page translation error',
+    )
   }
 
   if (typed.type === 'PAGE_TRANSLATION_ANALYZE_SAMPLES' && Array.isArray(typed.samples) && typeof typed.target === 'string') {
     try {
       sendResponse({ok: true, analysis: analyzePageTranslationSamples(typed as PageTranslationAnalyzeSamplesMessage)})
     } catch (error: unknown) {
-      const messageText = error instanceof Error ? error.message : 'Unknown page translation error'
-      sendResponse({ok: false, error: messageText})
+      sendErrorResponse(sendResponse, error, 'Unknown page translation error')
     }
     return
   }
 
   if (typed.type === 'SIDEPANEL_TRANSLATE' && typeof typed.text === 'string') {
-    translateSidePanel(typed as SidePanelTranslateMessage)
-      .then((translatedText) => sendResponse({ok: true, translatedText}))
-      .catch((error: unknown) => {
-        const messageText = error instanceof Error ? error.message : 'Unknown translation error'
-        sendResponse({ok: false, error: messageText})
-      })
-    return true
+    return sendPromiseResponse(
+      sendResponse,
+      translateSidePanel(typed as SidePanelTranslateMessage),
+      (translatedText) => ({ok: true, translatedText}),
+      'Unknown translation error',
+    )
   }
 
   if (typed.type === 'TRANSLATE_TEXT_PRECHECK' && typeof typed.text === 'string') {
-    precheckTranslateText(typed as TranslatePrecheckMessage)
-      .then(({skipped}) => sendResponse({ok: true, skipped}))
-      .catch((error: unknown) => {
-        const messageText = error instanceof Error ? error.message : 'Unknown translation error'
-        sendResponse({ok: false, error: messageText})
-      })
-    return true
+    return sendPromiseResponse(
+      sendResponse,
+      precheckTranslateText(typed as TranslatePrecheckMessage),
+      ({skipped}) => ({ok: true, skipped}),
+      'Unknown translation error',
+    )
   }
 
   if (typed.type !== 'TRANSLATE_TEXT' || typeof typed.text !== 'string') {
@@ -778,14 +863,12 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     return
   }
 
-  translateText(typed as TranslateRequestMessage)
-      .then(({translatedText, skipped}) => sendResponse({ok: true, translatedText, skipped}))
-      .catch((error: unknown) => {
-        const messageText = error instanceof Error ? error.message : 'Unknown translation error'
-        sendResponse({ok: false, error: messageText})
-      })
-
-  return true
+  return sendPromiseResponse(
+    sendResponse,
+    translateText(typed as TranslateRequestMessage),
+    ({translatedText, skipped}) => ({ok: true, translatedText, skipped}),
+    'Unknown translation error',
+  )
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {

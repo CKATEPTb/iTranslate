@@ -11,9 +11,24 @@ import {
     walkTextNodesDeep as walkTextNodesDeepBase,
 } from '../dom/domUtils'
 import type {TooltipController} from '../ui/FloatingTooltip'
+import type {DetectableLanguage} from '../../languageDetection'
+import {
+    getPageTranslationPromptCopy,
+    normalizePromptLanguage,
+    parsePromptLanguage,
+} from './pagePromptCopy'
+import {getPageTranslationPromptStyle} from './pagePromptStyle'
+import {
+    analyzeFastPageLanguage,
+    collectFastVisiblePageLanguageText as collectFastVisiblePageLanguageTextBase,
+    collectVisiblePageLanguageSamples as collectVisiblePageLanguageSamplesBase,
+    type PageLanguageAnalysis,
+} from './pageLanguageAnalysis'
+import {hasTranslatableText, splitPreservingWhitespace} from './pageTextUtils'
+import {PageTranslationMemory} from './pageTranslationMemory'
+import {PageTranslationWorkQueue} from './pageTranslationWorkQueue'
 
 type TranslateMode = 'selection' | 'input' | 'page'
-type DetectableLanguage = 'en' | 'ru' | 'ua' | 'de' | 'fr'
 type TranslateResponse = { ok: true; translatedText: string; skipped?: boolean } | { ok: false; error?: string }
 type RuntimeMessageResult<T> = {response?: T; error?: string; contextInvalidated?: boolean}
 
@@ -46,6 +61,8 @@ const PAGE_STATUS_STYLE_ID = 'itranslate-page-status-style'
 const PAGE_TRANSLATION_CONCURRENCY = 3
 const PAGE_TRANSLATION_MUTATION_RESCAN_DELAY_MS = 350
 const PAGE_TRANSLATION_ACTIVE_RESCAN_INTERVAL_MS = 2200
+const PAGE_TRANSLATION_ACTIVE_RESCAN_MAX_INTERVAL_MS = 6000
+const PAGE_TRANSLATION_ACTIVE_RESCAN_RECENT_COLLECT_MS = 1200
 const PAGE_ORIGINAL_TOOLTIP_DELAY_MS = 1250
 const PAGE_TRANSLATION_SUGGESTION_THRESHOLD = 0.05
 const PAGE_TRANSLATION_SUGGESTION_MAX_NODES = 140
@@ -95,12 +112,6 @@ const PAGE_TRANSLATION_PLACEHOLDER_SKIP_SELECTOR = [
 ].join(',')
 
 type PageTranslationStateResponse = { ok: boolean; enabled?: boolean; sourceLanguage?: string; error?: string }
-type PageLanguageAnalysis = {
-    sourceLanguage: DetectableLanguage
-    mismatchRatio: number
-    totalWeight: number
-    mismatchWeight: number
-}
 type PageTranslationSuggestSettingsResponse = {
     ok: boolean
     supported?: boolean
@@ -124,8 +135,6 @@ type PageTranslationSetSitePreferenceResponse = {
     alwaysFrom?: string[]
     error?: string
 }
-
-let pageTranslationSourceOverride: DetectableLanguage | null = null
 
 type PageTextMeta = {
     runId: number
@@ -155,22 +164,16 @@ let pageTranslationObserver: MutationObserver | null = null
 let pageTranslationSuggestionObserver: MutationObserver | null = null
 let pageTranslationVisibilityObserver: IntersectionObserver | null = null
 let pageTranslationRunId = 0
-let pageTranslationActiveCount = 0
-let pageTranslationPlaceholderActiveCount = 0
 
-const pageTranslationQueue: Text[] = []
-const pageTranslationQueued = new WeakSet<Text>()
-const pageTranslationPlaceholderQueue: PagePlaceholderElement[] = []
-const pageTranslationPlaceholderQueued = new WeakSet<PagePlaceholderElement>()
+const pageTranslationTextQueue = new PageTranslationWorkQueue<Text>()
+const pageTranslationPlaceholderQueue = new PageTranslationWorkQueue<PagePlaceholderElement>()
+const pageTranslationMemory = new PageTranslationMemory()
 const pageTranslationMeta = new WeakMap<Text, PageTextMeta>()
 const pageTranslationPlaceholderMeta = new WeakMap<PagePlaceholderElement, PagePlaceholderMeta>()
 const pageTranslationNodes = new Set<Text>()
 const pageTranslationPlaceholderElements = new Set<PagePlaceholderElement>()
 const pageTranslationObserved = new Map<Element, Set<Text>>()
 const pageTranslationObservedPlaceholders = new Set<PagePlaceholderElement>()
-const pageTranslationCache = new Map<string, string>()
-const pageTranslationSkipCache = new Set<string>()
-const pageTranslationInflight = new Map<string, Promise<string | null>>()
 const pageTranslationShadowRoots = new Set<ShadowRoot>()
 const pageTranslationSuggestionShadowRoots = new Set<ShadowRoot>()
 const pageTranslationStatuses = new WeakMap<Text, PageTranslationStatus>()
@@ -191,6 +194,8 @@ let pageOriginalTooltipVisibleNode: Text | null = null
 let pageOriginalTooltipPendingText = ''
 let pageTranslationMutationRescanTimer: number | null = null
 let pageTranslationActiveRescanTimer: number | null = null
+let pageTranslationActiveRescanDelay = PAGE_TRANSLATION_ACTIVE_RESCAN_INTERVAL_MS
+let pageTranslationLastCollectAt = 0
 
 type PageTranslationDebugWindow = Window & {
     __itranslatePageTranslationDebug?: () => Record<string, unknown>
@@ -244,19 +249,19 @@ function getPageTranslationDebugSnapshot(): Record<string, unknown> {
         visibilityObserverActive: !!pageTranslationVisibilityObserver,
         runtimeValid: pageDeps?.isRuntimeValid() ?? false,
         runId: pageTranslationRunId,
-        sourceOverride: pageTranslationSourceOverride,
-        textQueueLength: pageTranslationQueue.length,
-        textActiveCount: pageTranslationActiveCount,
+        sourceOverride: pageTranslationMemory.sourceLanguageOverride,
+        textQueueLength: pageTranslationTextQueue.length,
+        textActiveCount: pageTranslationTextQueue.activeCount,
         placeholderQueueLength: pageTranslationPlaceholderQueue.length,
-        placeholderActiveCount: pageTranslationPlaceholderActiveCount,
+        placeholderActiveCount: pageTranslationPlaceholderQueue.activeCount,
         translatedTextNodeCount: pageTranslationNodes.size,
         translatedPlaceholderCount: pageTranslationPlaceholderElements.size,
         observedVisibilityTargets: pageTranslationObserved.size,
         observedVisibilityPlaceholders: pageTranslationObservedPlaceholders.size,
         observedShadowRoots: pageTranslationShadowRoots.size,
-        cacheSize: pageTranslationCache.size,
-        skipCacheSize: pageTranslationSkipCache.size,
-        inflightCount: pageTranslationInflight.size,
+        cacheSize: pageTranslationMemory.cacheSize,
+        skipCacheSize: pageTranslationMemory.skipCacheSize,
+        inflightCount: pageTranslationMemory.inflightCount,
         suggestionObserverActive: !!pageTranslationSuggestionObserver,
         suggestionDismissed: pageTranslationSuggestionDismissed,
         observerCreatedAt: formatDebugTime(pageTranslationDebug.observerCreatedAt),
@@ -273,6 +278,8 @@ function getPageTranslationDebugSnapshot(): Record<string, unknown> {
         mutationRescansScheduled: pageTranslationDebug.mutationRescansScheduled,
         mutationRescansRun: pageTranslationDebug.mutationRescansRun,
         activeRescansRun: pageTranslationDebug.activeRescansRun,
+        activeRescanDelayMs: pageTranslationActiveRescanDelay,
+        lastCollectAt: formatDebugTime(pageTranslationLastCollectAt),
         queuedText: pageTranslationDebug.queuedText,
         queuedPlaceholders: pageTranslationDebug.queuedPlaceholders,
         translatedText: pageTranslationDebug.translatedText,
@@ -385,13 +392,7 @@ function hidePageTextTranslationStatus(node?: Text) {
 }
 
 function setPageTranslationSourceOverride(sourceLanguage?: DetectableLanguage | null): boolean {
-    if (!sourceLanguage || pageTranslationSourceOverride === sourceLanguage) return false
-
-    pageTranslationSourceOverride = sourceLanguage
-    pageTranslationCache.clear()
-    pageTranslationSkipCache.clear()
-    pageTranslationInflight.clear()
-    return true
+    return pageTranslationMemory.setSourceOverride(sourceLanguage)
 }
 
 function normalizePageTranslationSourceLanguage(language: string | undefined): DetectableLanguage | null {
@@ -490,12 +491,17 @@ function textNodeContainsPoint(node: Text, clientX: number, clientY: number): bo
     const range = document.createRange()
     try {
         range.selectNodeContents(node)
-        return Array.from(range.getClientRects()).some(rect =>
-            clientX >= rect.left &&
-            clientX <= rect.right &&
-            clientY >= rect.top &&
-            clientY <= rect.bottom
-        )
+        for (const rect of range.getClientRects()) {
+            if (
+                clientX >= rect.left &&
+                clientX <= rect.right &&
+                clientY >= rect.top &&
+                clientY <= rect.bottom
+            ) {
+                return true
+            }
+        }
+        return false
     } finally {
         range.detach()
     }
@@ -583,20 +589,6 @@ function stopPageOriginalTooltipListeners() {
     hidePageOriginalTooltip()
 }
 
-function splitPreservingWhitespace(text: string) {
-    const leading = text.match(/^\s*/)?.[0] ?? ''
-    const trailing = text.match(/\s*$/)?.[0] ?? ''
-    return {
-        leading,
-        value: text.trim(),
-        trailing,
-    }
-}
-
-function hasTranslatableText(text: string): boolean {
-    return /[\p{L}]/u.test(text)
-}
-
 function walkTextNodesDeep(root: Node, visitText: (node: Text) => boolean | void): boolean {
     return walkTextNodesDeepBase(root, visitText, shouldSkipPageTranslationElement)
 }
@@ -611,95 +603,6 @@ function hasTranslatableTextDeep(root: Node): boolean {
 
 function isTextNodeVisible(node: Text): boolean {
     return isTextNodeVisibleBase(node, shouldSkipPageTranslationElement)
-}
-
-const PAGE_PROMPT_LANGUAGE_ALIASES: Record<string, DetectableLanguage> = {
-    en: 'en',
-    eng: 'en',
-    english: 'en',
-    ru: 'ru',
-    rus: 'ru',
-    russian: 'ru',
-    uk: 'ua',
-    ua: 'ua',
-    ukr: 'ua',
-    ukrainian: 'ua',
-    de: 'de',
-    deu: 'de',
-    ger: 'de',
-    german: 'de',
-    fr: 'fr',
-    fra: 'fr',
-    fre: 'fr',
-    french: 'fr',
-}
-
-const PAGE_PROMPT_FROM_LANGUAGE_NAMES: Record<DetectableLanguage, Record<DetectableLanguage, string>> = {
-    en: {
-        en: 'English',
-        ru: 'Russian',
-        ua: 'Ukrainian',
-        de: 'German',
-        fr: 'French',
-    },
-    ru: {
-        en: 'английского',
-        ru: 'русского',
-        ua: 'украинского',
-        de: 'немецкого',
-        fr: 'французского',
-    },
-    ua: {
-        en: 'англійської',
-        ru: 'російської',
-        ua: 'української',
-        de: 'німецької',
-        fr: 'французької',
-    },
-    de: {
-        en: 'Englisch',
-        ru: 'Russisch',
-        ua: 'Ukrainisch',
-        de: 'Deutsch',
-        fr: 'Französisch',
-    },
-    fr: {
-        en: "l'anglais",
-        ru: 'le russe',
-        ua: "l'ukrainien",
-        de: "l'allemand",
-        fr: 'le français',
-    },
-}
-
-const PAGE_PROMPT_LANGUAGE_CODES: Record<DetectableLanguage, string> = {
-    en: 'EN',
-    ru: 'RU',
-    ua: 'UA',
-    de: 'DE',
-    fr: 'FR',
-}
-
-function parsePromptLanguage(language: string | undefined | null): DetectableLanguage | null {
-    if (!language) return null
-
-    const normalized = language.trim().toLowerCase()
-    if (!normalized) return null
-
-    for (const part of normalized.split(/[,;]/)) {
-        const token = part.trim()
-        if (!token) continue
-
-        const primary = token.split(/[-_\s]/)[0]
-        const parsed = PAGE_PROMPT_LANGUAGE_ALIASES[token] ?? PAGE_PROMPT_LANGUAGE_ALIASES[primary]
-        if (parsed) return parsed
-    }
-
-    return null
-}
-
-function normalizePromptLanguage(language: string | undefined): DetectableLanguage {
-    return parsePromptLanguage(language) ?? 'en'
 }
 
 function getDocumentLanguageHint(): DetectableLanguage | null {
@@ -721,10 +624,6 @@ function normalizeSiteHostname(hostname: string): string {
     return hostname.trim().toLowerCase().replace(/^www\./, '')
 }
 
-function normalizePageLanguageSampleText(text: string): string {
-    return text.replace(/\s+/g, ' ').trim()
-}
-
 function getPageLanguageSampleContainer(node: Text): Element | null {
     const block = getSelectionBlockForNode(node)
     if (block && !isDocumentScopeElement(block)) return block
@@ -732,237 +631,38 @@ function getPageLanguageSampleContainer(node: Text): Element | null {
     return node.parentElement
 }
 
-function getPageTranslationPromptCopy(targetLanguage: DetectableLanguage, sourceLanguage: DetectableLanguage, hostname: string) {
-    const source = PAGE_PROMPT_FROM_LANGUAGE_NAMES[targetLanguage][sourceLanguage]
-    const context = `${hostname} · ${PAGE_PROMPT_LANGUAGE_CODES[sourceLanguage]} -> ${PAGE_PROMPT_LANGUAGE_CODES[targetLanguage]}`
-
-    if (targetLanguage === 'ru') {
-        return {
-            title: 'Перевести страницу?',
-            context,
-            translate: 'Перевести',
-            never: 'Никогда',
-            always: 'Всегда',
-            neverTitle: `Никогда не переводить ${hostname}`,
-            alwaysTitle: `Всегда переводить с ${source}`,
-            close: 'Закрыть',
-        }
-    }
-
-    if (targetLanguage === 'ua') {
-        return {
-            title: 'Перекласти сторінку?',
-            context,
-            translate: 'Перекласти',
-            never: 'Ніколи',
-            always: 'Завжди',
-            neverTitle: `Ніколи не перекладати ${hostname}`,
-            alwaysTitle: `Завжди перекладати з ${source}`,
-            close: 'Закрити',
-        }
-    }
-
-    if (targetLanguage === 'de') {
-        return {
-            title: 'Seite übersetzen?',
-            context,
-            translate: 'Übersetzen',
-            never: 'Nie',
-            always: 'Immer',
-            neverTitle: `${hostname} nie übersetzen`,
-            alwaysTitle: `Immer aus ${source} übersetzen`,
-            close: 'Schließen',
-        }
-    }
-
-    if (targetLanguage === 'fr') {
-        return {
-            title: 'Traduire la page ?',
-            context,
-            translate: 'Traduire',
-            never: 'Jamais',
-            always: 'Toujours',
-            neverTitle: `Ne jamais traduire ${hostname}`,
-            alwaysTitle: `Toujours traduire depuis ${source}`,
-            close: 'Fermer',
-        }
-    }
-
-    return {
-        title: 'Translate this page?',
-        context,
-        translate: 'Translate',
-        never: 'Never',
-        always: 'Always',
-        neverTitle: `Never translate ${hostname}`,
-        alwaysTitle: `Always translate from ${source}`,
-        close: 'Close',
-    }
-}
-
 function collectVisiblePageLanguageSamples(): string[] {
-    if (!document.body) return []
-
-    const sampleParts = new Map<Element, string[]>()
-    let collectedChars = 0
-    let scannedTextNodes = 0
-    let visibleTextNodes = 0
-
-    walkTextNodesDeep(document.body, node => {
-        const rawText = node.textContent?.trim() ?? ''
-        if (!hasTranslatableText(rawText)) return
-
-        scannedTextNodes++
-        if (scannedTextNodes >= PAGE_TRANSLATION_SUGGESTION_MAX_SCANNED_TEXT_NODES) return false
-        if (collectedChars >= PAGE_TRANSLATION_SUGGESTION_MAX_CHARS) return false
-
-        if (!isTextNodeVisible(node)) return
-        visibleTextNodes++
-        if (visibleTextNodes > PAGE_TRANSLATION_SUGGESTION_MAX_VISIBLE_TEXT_NODES) return false
-
-        const value = normalizePageLanguageSampleText(node.nodeValue ?? '')
-        if (!value || !hasTranslatableText(value)) return
-
-        const container = getPageLanguageSampleContainer(node)
-        if (!container) return
-
-        const parts = sampleParts.get(container) ?? []
-        parts.push(value)
-        sampleParts.set(container, parts)
-        collectedChars += value.length
+    return collectVisiblePageLanguageSamplesBase(document.body, {
+        walkTextNodesDeep,
+        isTextNodeVisible,
+        hasTranslatableText,
+        getSampleContainer: getPageLanguageSampleContainer,
+        maxSampleNodes: PAGE_TRANSLATION_SUGGESTION_MAX_NODES,
+        maxVisibleTextNodes: PAGE_TRANSLATION_SUGGESTION_MAX_VISIBLE_TEXT_NODES,
+        maxScannedTextNodes: PAGE_TRANSLATION_SUGGESTION_MAX_SCANNED_TEXT_NODES,
+        maxChars: PAGE_TRANSLATION_SUGGESTION_MAX_CHARS,
     })
-
-    const samples: string[] = []
-    for (const parts of sampleParts.values()) {
-        if (samples.length >= PAGE_TRANSLATION_SUGGESTION_MAX_NODES) break
-
-        const sample = normalizePageLanguageSampleText(parts.join(' '))
-        if (sample.length >= 12) {
-            samples.push(sample)
-        }
-    }
-
-    return samples
 }
 
 function collectFastVisiblePageLanguageText(): string {
-    if (!document.body) return ''
-
-    const parts: string[] = []
-    let collectedChars = 0
-    let scannedTextNodes = 0
-    let visibleTextNodes = 0
-
-    walkTextNodesDeep(document.body, node => {
-        const rawText = node.textContent?.trim() ?? ''
-        if (!hasTranslatableText(rawText)) return
-
-        scannedTextNodes++
-        if (scannedTextNodes >= PAGE_TRANSLATION_FAST_SUGGESTION_MAX_SCANNED_TEXT_NODES) return false
-        if (collectedChars >= PAGE_TRANSLATION_FAST_SUGGESTION_MAX_CHARS) return false
-
-        if (!isTextNodeVisible(node)) return
-        visibleTextNodes++
-        if (visibleTextNodes > PAGE_TRANSLATION_FAST_SUGGESTION_MAX_VISIBLE_TEXT_NODES) return false
-
-        const value = normalizePageLanguageSampleText(node.nodeValue ?? '')
-        if (!value || !hasTranslatableText(value)) return
-
-        parts.push(value)
-        collectedChars += value.length
+    return collectFastVisiblePageLanguageTextBase(document.body, {
+        walkTextNodesDeep,
+        isTextNodeVisible,
+        hasTranslatableText,
+        maxVisibleTextNodes: PAGE_TRANSLATION_FAST_SUGGESTION_MAX_VISIBLE_TEXT_NODES,
+        maxScannedTextNodes: PAGE_TRANSLATION_FAST_SUGGESTION_MAX_SCANNED_TEXT_NODES,
+        maxChars: PAGE_TRANSLATION_FAST_SUGGESTION_MAX_CHARS,
     })
-
-    return normalizePageLanguageSampleText(parts.join(' '))
-}
-
-function getFastLetterStats(text: string) {
-    let letters = 0
-    let latin = 0
-    let cyrillic = 0
-
-    for (const letter of text.match(/\p{L}/gu) ?? []) {
-        letters++
-        if (/\p{Script=Latin}/u.test(letter)) latin++
-        else if (/\p{Script=Cyrillic}/u.test(letter)) cyrillic++
-    }
-
-    return {letters, latin, cyrillic}
-}
-
-function fastLanguageScriptMatches(language: DetectableLanguage, stats: ReturnType<typeof getFastLetterStats>): boolean {
-    if (stats.letters < PAGE_TRANSLATION_FAST_SUGGESTION_MIN_LETTERS) return false
-
-    const latinRatio = stats.latin / stats.letters
-    const cyrillicRatio = stats.cyrillic / stats.letters
-    return language === 'ru' || language === 'ua'
-        ? cyrillicRatio >= 0.55
-        : latinRatio >= 0.55
-}
-
-function guessFastLatinLanguage(text: string, documentLanguage: DetectableLanguage | null): DetectableLanguage {
-    if (documentLanguage === 'en' || documentLanguage === 'de' || documentLanguage === 'fr') return documentLanguage
-
-    const lower = text.toLowerCase()
-    if (/[\u00e0-\u00e6\u00e7\u00e8-\u00ef\u00f4\u0153\u00f9-\u00fc\u00ff]/u.test(lower)) return 'fr'
-    if (/[\u00e4\u00f6\u00fc\u00df]/u.test(lower)) return 'de'
-    if (/\b(le|la|les|des|une|pour|que|qui|dans|avec)\b/u.test(lower)) return 'fr'
-    if (/\b(der|die|das|und|nicht|mit|ich|ist|ein|eine)\b/u.test(lower)) return 'de'
-    return 'en'
-}
-
-function guessFastCyrillicLanguage(text: string, documentLanguage: DetectableLanguage | null): DetectableLanguage {
-    if (documentLanguage === 'ru' || documentLanguage === 'ua') return documentLanguage
-
-    const lower = text.toLowerCase()
-    if (/[\u0456\u0406\u0457\u0407\u0454\u0404\u0491\u0490]/u.test(lower)) return 'ua'
-    return 'ru'
 }
 
 function analyzeFastVisiblePageLanguage(targetLanguage: DetectableLanguage): PageLanguageAnalysis | null {
     const text = collectFastVisiblePageLanguageText()
-    const stats = getFastLetterStats(text)
-    if (stats.letters < PAGE_TRANSLATION_FAST_SUGGESTION_MIN_LETTERS) return null
-
-    const documentLanguage = getDocumentLanguageHint()
-    const latinRatio = stats.latin / stats.letters
-    const cyrillicRatio = stats.cyrillic / stats.letters
-    let sourceLanguage: DetectableLanguage | null = null
-    let mismatchRatio = 0
-
-    if (targetLanguage === 'ru' || targetLanguage === 'ua') {
-        if (latinRatio >= 0.55) {
-            sourceLanguage = guessFastLatinLanguage(text, documentLanguage)
-            mismatchRatio = latinRatio
-        } else if (
-            documentLanguage &&
-            documentLanguage !== targetLanguage &&
-            fastLanguageScriptMatches(documentLanguage, stats)
-        ) {
-            sourceLanguage = documentLanguage
-            mismatchRatio = 0.65
-        }
-    } else {
-        if (cyrillicRatio >= 0.55) {
-            sourceLanguage = guessFastCyrillicLanguage(text, documentLanguage)
-            mismatchRatio = cyrillicRatio
-        } else if (
-            documentLanguage &&
-            documentLanguage !== targetLanguage &&
-            fastLanguageScriptMatches(documentLanguage, stats)
-        ) {
-            sourceLanguage = documentLanguage
-            mismatchRatio = 0.65
-        }
-    }
-
-    if (!sourceLanguage || sourceLanguage === targetLanguage) return null
-
-    return {
-        sourceLanguage,
-        mismatchRatio,
-        totalWeight: stats.letters,
-        mismatchWeight: Math.round(stats.letters * mismatchRatio),
-    }
+    return analyzeFastPageLanguage(
+        text,
+        targetLanguage,
+        getDocumentLanguageHint(),
+        PAGE_TRANSLATION_FAST_SUGGESTION_MIN_LETTERS
+    )
 }
 
 async function analyzeVisiblePageLanguage(targetLanguage: DetectableLanguage): Promise<PageLanguageAnalysis | null> {
@@ -987,7 +687,7 @@ function ensurePageTranslationPromptStyle() {
 
     const style = document.createElement('style')
     style.id = PAGE_TRANSLATION_PROMPT_STYLE_ID
-    style.textContent = `#${PAGE_TRANSLATION_PROMPT_ID}{--itranslate-page-prompt-progress:1;--itranslate-page-prompt-bg:rgba(15,23,42,.9);--itranslate-page-prompt-fg:#f8fafc;--itranslate-page-prompt-muted:#cbd5e1;--itranslate-page-prompt-border:rgba(148,163,184,.24);--itranslate-page-prompt-shadow:0 14px 38px rgba(15,23,42,.34);--itranslate-page-prompt-close-bg:rgba(255,255,255,.08);--itranslate-page-prompt-secondary-bg:rgba(255,255,255,.06);--itranslate-page-prompt-secondary-border:rgba(255,255,255,.12);--itranslate-page-prompt-progress-bg:rgba(148,163,184,.2);--itranslate-page-prompt-progress-fg:#38bdf8;position:fixed;right:14px;top:14px;z-index:2147483647;display:none;width:min(304px,calc(100vw - 28px));padding:10px 10px 9px;border-radius:14px;background:var(--itranslate-page-prompt-bg);color:var(--itranslate-page-prompt-fg);border:1px solid var(--itranslate-page-prompt-border);box-shadow:var(--itranslate-page-prompt-shadow);font:12px/1.35 -apple-system,"Segoe UI",sans-serif;backdrop-filter:blur(18px) saturate(160%);-webkit-backdrop-filter:blur(18px) saturate(160%);overflow:hidden}#${PAGE_TRANSLATION_PROMPT_ID}.itranslate-page-prompt-light{--itranslate-page-prompt-bg:rgba(248,250,252,.95);--itranslate-page-prompt-fg:#0f172a;--itranslate-page-prompt-muted:#64748b;--itranslate-page-prompt-border:rgba(15,23,42,.12);--itranslate-page-prompt-shadow:0 14px 34px rgba(15,23,42,.14);--itranslate-page-prompt-close-bg:rgba(15,23,42,.07);--itranslate-page-prompt-secondary-bg:rgba(255,255,255,.72);--itranslate-page-prompt-secondary-border:rgba(15,23,42,.1);--itranslate-page-prompt-progress-bg:rgba(15,23,42,.1);--itranslate-page-prompt-progress-fg:#0284c7}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-row{display:grid;grid-template-columns:minmax(0,1fr) 22px;align-items:start;gap:8px;margin-bottom:9px}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-title-wrap{min-width:0}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-title{min-width:0;margin:0;font-weight:760;color:var(--itranslate-page-prompt-fg);font-size:13px;line-height:1.2}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-context{display:block;margin-top:3px;color:var(--itranslate-page-prompt-muted);font-size:11px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-close{width:22px;height:22px;border:0;border-radius:999px;background:var(--itranslate-page-prompt-close-bg);color:var(--itranslate-page-prompt-muted);cursor:pointer;font:15px/1 -apple-system,"Segoe UI",sans-serif}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-actions{display:grid;grid-template-columns:1.18fr .82fr .82fr;gap:6px}#${PAGE_TRANSLATION_PROMPT_ID} button{font:11.5px/1.15 -apple-system,"Segoe UI",sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-primary,#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-secondary{min-width:0;min-height:28px;border-radius:8px;padding:6px 8px;cursor:pointer;text-align:center}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-primary{border:1px solid rgba(56,189,248,.72);background:#38bdf8;color:#082f49;font-weight:750}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-secondary{border:1px solid var(--itranslate-page-prompt-secondary-border);background:var(--itranslate-page-prompt-secondary-bg);color:var(--itranslate-page-prompt-fg)}#${PAGE_TRANSLATION_PROMPT_ID} button:hover{filter:brightness(1.06)}#${PAGE_TRANSLATION_PROMPT_ID} button:focus{outline:2px solid rgba(56,189,248,.45);outline-offset:1px}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-progress{height:2px;margin:9px -10px -9px;background:var(--itranslate-page-prompt-progress-bg);overflow:hidden}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-progress-bar{display:block;width:100%;height:100%;background:var(--itranslate-page-prompt-progress-fg);transform-origin:left center;transform:scaleX(var(--itranslate-page-prompt-progress))}@media (max-width:340px){#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-actions{grid-template-columns:1fr 1fr}#${PAGE_TRANSLATION_PROMPT_ID} .itranslate-page-prompt-primary{grid-column:1 / -1}}`
+    style.textContent = getPageTranslationPromptStyle(PAGE_TRANSLATION_PROMPT_ID)
     document.documentElement.appendChild(style)
 }
 
@@ -1110,7 +810,7 @@ function requestPageTranslationStart(sourceLanguage: DetectableLanguage) {
             if (response?.ok === false) {
                 markPageTranslationRuntimeState('set-active-rejected')
                 markPageTranslationError(response.error ?? 'Background rejected page translation activation')
-                pageTranslationSourceOverride = null
+                pageTranslationMemory.clearSourceOverride()
                 stopPageTranslation()
                 return
             }
@@ -1125,6 +825,24 @@ function requestPageTranslationStart(sourceLanguage: DetectableLanguage) {
             }
             markPageTranslationRuntimeState('set-active-ok')
         })
+}
+
+function isPageTranslationSuggestionBlocked(): boolean {
+    return pageTranslationEnabled || pageTranslationSuggestionDismissed || !!pageTranslationPromptEl || !getPageDeps().isRuntimeValid()
+}
+
+function createPageTranslationPromptButton(className: string, text: string, label?: string): HTMLButtonElement {
+    const button = document.createElement('button')
+    button.className = className
+    button.type = 'button'
+    button.textContent = text
+
+    if (label) {
+        button.title = label
+        button.setAttribute('aria-label', label)
+    }
+
+    return button
 }
 
 function showPageTranslationPrompt(hostname: string, targetLanguage: DetectableLanguage, sourceLanguage: DetectableLanguage) {
@@ -1153,35 +871,16 @@ function showPageTranslationPrompt(hostname: string, targetLanguage: DetectableL
 
     titleWrap.append(title, context)
 
-    const close = document.createElement('button')
-    close.className = 'itranslate-page-prompt-close'
-    close.type = 'button'
-    close.setAttribute('aria-label', copy.close)
-    close.textContent = '×'
+    const close = createPageTranslationPromptButton('itranslate-page-prompt-close', '×', copy.close)
 
     row.append(titleWrap, close)
 
     const actions = document.createElement('div')
     actions.className = 'itranslate-page-prompt-actions'
 
-    const translateButton = document.createElement('button')
-    translateButton.className = 'itranslate-page-prompt-primary'
-    translateButton.type = 'button'
-    translateButton.textContent = copy.translate
-
-    const neverButton = document.createElement('button')
-    neverButton.className = 'itranslate-page-prompt-secondary'
-    neverButton.type = 'button'
-    neverButton.textContent = copy.never
-    neverButton.title = copy.neverTitle
-    neverButton.setAttribute('aria-label', copy.neverTitle)
-
-    const alwaysButton = document.createElement('button')
-    alwaysButton.className = 'itranslate-page-prompt-secondary'
-    alwaysButton.type = 'button'
-    alwaysButton.textContent = copy.always
-    alwaysButton.title = copy.alwaysTitle
-    alwaysButton.setAttribute('aria-label', copy.alwaysTitle)
+    const translateButton = createPageTranslationPromptButton('itranslate-page-prompt-primary', copy.translate)
+    const neverButton = createPageTranslationPromptButton('itranslate-page-prompt-secondary', copy.never, copy.neverTitle)
+    const alwaysButton = createPageTranslationPromptButton('itranslate-page-prompt-secondary', copy.always, copy.alwaysTitle)
 
     const progress = document.createElement('div')
     progress.className = 'itranslate-page-prompt-progress'
@@ -1260,7 +959,7 @@ function stopPageTranslationSuggestionObserver() {
 }
 
 function schedulePageTranslationSuggestion(delay = 1200, resetRetries = false) {
-    if (pageTranslationEnabled || pageTranslationSuggestionDismissed || pageTranslationPromptEl || !getPageDeps().isRuntimeValid()) return
+    if (isPageTranslationSuggestionBlocked()) return
     if (resetRetries) resetPageTranslationSuggestionRetries()
     clearPageTranslationSuggestionTimer()
     pageTranslationSuggestionTimer = window.setTimeout(() => {
@@ -1274,7 +973,7 @@ function handlePageTranslationSuggestionViewportChange() {
 }
 
 function schedulePageTranslationSuggestionRetry() {
-    if (pageTranslationEnabled || pageTranslationSuggestionDismissed || pageTranslationPromptEl || !getPageDeps().isRuntimeValid()) return
+    if (isPageTranslationSuggestionBlocked()) return
 
     const delay = PAGE_TRANSLATION_SUGGESTION_RETRY_DELAYS_MS[pageTranslationSuggestionRetryCount]
     if (delay == null) return
@@ -1300,7 +999,7 @@ function observePageTranslationSuggestionShadowRoots(root: Node) {
 }
 
 function startPageTranslationSuggestionObserver() {
-    if (pageTranslationSuggestionObserver || pageTranslationEnabled || pageTranslationSuggestionDismissed || pageTranslationPromptEl || !getPageDeps().isRuntimeValid()) return
+    if (pageTranslationSuggestionObserver || isPageTranslationSuggestionBlocked()) return
 
     const root = document.body ?? document.documentElement
     if (!root) {
@@ -1309,20 +1008,20 @@ function startPageTranslationSuggestionObserver() {
     }
 
     pageTranslationSuggestionObserver = new MutationObserver((mutations) => {
-        if (pageTranslationEnabled || pageTranslationSuggestionDismissed || pageTranslationPromptEl || !getPageDeps().isRuntimeValid()) {
+        if (isPageTranslationSuggestionBlocked()) {
             stopPageTranslationSuggestionObserver()
             return
         }
 
         const hasTextChange = mutations.some((mutation) => {
             if (mutation.type === 'characterData') return true
-            return Array.from(mutation.addedNodes).some((node) => {
+            for (const node of mutation.addedNodes) {
                 observePageTranslationSuggestionShadowRoots(node)
                 if (node.nodeType === Node.TEXT_NODE) return hasTranslatableText(node.textContent ?? '')
-                if (!(node instanceof Element)) return false
-                if (shouldSkipPageTranslationElement(node)) return false
-                return hasTranslatableTextDeep(node)
-            })
+                if (!(node instanceof Element) || shouldSkipPageTranslationElement(node)) continue
+                if (hasTranslatableTextDeep(node)) return true
+            }
+            return false
         })
         if (hasTextChange) schedulePageTranslationSuggestion(1400, true)
     })
@@ -1338,7 +1037,7 @@ function startPageTranslationSuggestionObserver() {
 }
 
 async function maybeSuggestPageTranslation() {
-    if (pageTranslationEnabled || pageTranslationSuggestionDismissed || pageTranslationPromptEl || !getPageDeps().isRuntimeValid()) return
+    if (isPageTranslationSuggestionBlocked()) return
     if (!document.body) {
         schedulePageTranslationSuggestion(800)
         startPageTranslationSuggestionObserver()
@@ -1411,7 +1110,7 @@ function reusePageTranslationIfUnchanged(node: Text): boolean {
 function applyCachedPageTranslationIfAvailable(node: Text): boolean {
     const sourceText = node.nodeValue ?? ''
     const {value} = splitPreservingWhitespace(sourceText)
-    const translated = pageTranslationCache.get(value)
+    const translated = pageTranslationMemory.getCached(value)
     if (!translated) return false
 
     applyPageTranslation(node, sourceText, translated)
@@ -1419,19 +1118,19 @@ function applyCachedPageTranslationIfAvailable(node: Text): boolean {
 }
 
 function isPageTranslationKnownSkipped(value: string): boolean {
-    return pageTranslationSkipCache.has(value)
+    return pageTranslationMemory.isSkipped(value)
 }
 
 function translatePageValue(value: string): Promise<string | null> {
     if (isPageTranslationKnownSkipped(value)) return Promise.resolve(null)
 
-    const cached = pageTranslationCache.get(value)
+    const cached = pageTranslationMemory.getCached(value)
     if (cached) return Promise.resolve(cached)
 
-    const inflight = pageTranslationInflight.get(value)
+    const inflight = pageTranslationMemory.getActiveRequest(value)
     if (inflight) return inflight
 
-    const request = getPageDeps().translateWithResponse(value, 'page', pageTranslationSourceOverride ?? undefined)
+    const request = getPageDeps().translateWithResponse(value, 'page', pageTranslationMemory.sourceLanguageOverride ?? undefined)
         .then(response => {
             if (!response.ok) {
                 pageTranslationDebug.failedTranslations++
@@ -1440,20 +1139,20 @@ function translatePageValue(value: string): Promise<string | null> {
             }
             if (response.skipped) {
                 pageTranslationDebug.skippedTranslations++
-                pageTranslationSkipCache.add(value)
+                pageTranslationMemory.markSkipped(value)
                 return null
             }
             const translated = response.ok && !response.skipped && typeof response.translatedText === 'string'
                 ? response.translatedText
                 : null
-            if (translated) pageTranslationCache.set(value, translated)
+            if (translated) pageTranslationMemory.setCached(value, translated)
             return translated
         })
         .finally(() => {
-            pageTranslationInflight.delete(value)
+            pageTranslationMemory.deleteActiveRequest(value)
         })
 
-    pageTranslationInflight.set(value, request)
+    pageTranslationMemory.setActiveRequest(value, request)
     return request
 }
 
@@ -1478,14 +1177,20 @@ function isPagePlaceholderVisible(element: PagePlaceholderElement): boolean {
     const style = window.getComputedStyle(element)
     if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false
 
-    return Array.from(element.getClientRects()).some(rect => (
-        rect.width > 0 &&
-        rect.height > 0 &&
-        rect.bottom >= 0 &&
-        rect.right >= 0 &&
-        rect.top <= window.innerHeight &&
-        rect.left <= window.innerWidth
-    ))
+    for (const rect of element.getClientRects()) {
+        if (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            rect.bottom >= 0 &&
+            rect.right >= 0 &&
+            rect.top <= window.innerHeight &&
+            rect.left <= window.innerWidth
+        ) {
+            return true
+        }
+    }
+
+    return false
 }
 
 function isPageTranslationPlaceholderCandidate(element: Element): element is PagePlaceholderElement {
@@ -1556,7 +1261,7 @@ function reusePagePlaceholderTranslationIfUnchanged(element: PagePlaceholderElem
 function applyCachedPagePlaceholderTranslationIfAvailable(element: PagePlaceholderElement): boolean {
     const sourceText = element.getAttribute('placeholder') ?? ''
     const {value} = splitPreservingWhitespace(sourceText)
-    const translated = pageTranslationCache.get(value)
+    const translated = pageTranslationMemory.getCached(value)
     if (!translated) return false
 
     applyPagePlaceholderTranslation(element, sourceText, translated)
@@ -1590,8 +1295,8 @@ function unobservePageTextNode(node: Text) {
 function checkObservedPageTextNodes() {
     if (!pageTranslationEnabled) return
 
-    for (const [target, nodes] of Array.from(pageTranslationObserved)) {
-        for (const node of Array.from(nodes)) {
+    for (const [target, nodes] of pageTranslationObserved) {
+        for (const node of nodes) {
             if (!node.isConnected || !isPageTranslationCandidate(node)) {
                 nodes.delete(node)
                 continue
@@ -1699,13 +1404,14 @@ function clearPageTranslationVisibilityObserver() {
 }
 
 function handlePageTranslationViewportChange() {
+    resetPageTranslationActiveRescanDelay()
     scheduleObservedPageTextNodeCheck()
 }
 
 function checkObservedPagePlaceholders() {
     if (!pageTranslationEnabled) return
 
-    for (const element of Array.from(pageTranslationObservedPlaceholders)) {
+    for (const element of pageTranslationObservedPlaceholders) {
         if (!element.isConnected || !isPageTranslationPlaceholderCandidate(element)) {
             pageTranslationObservedPlaceholders.delete(element)
             pageTranslationVisibilityObserver?.unobserve(element)
@@ -1721,7 +1427,7 @@ function checkObservedPagePlaceholders() {
 }
 
 function enqueuePageTextNode(node: Text, requireVisible = true) {
-    if (!pageTranslationEnabled || pageTranslationQueued.has(node) || !isPageTranslationCandidate(node)) return
+    if (!pageTranslationEnabled || pageTranslationTextQueue.isQueued(node) || !isPageTranslationCandidate(node)) return
     if (requireVisible && !isTextNodeVisible(node)) {
         observePageTextNode(node)
         return
@@ -1731,21 +1437,21 @@ function enqueuePageTextNode(node: Text, requireVisible = true) {
     if (isPageTranslationKnownSkipped(splitPreservingWhitespace(node.nodeValue ?? '').value)) return
 
     unobservePageTextNode(node)
-    pageTranslationQueued.add(node)
-    pageTranslationQueue.push(node)
+    pageTranslationTextQueue.enqueue(node)
     pageTranslationDebug.queuedText++
     updatePageTranslationStatus()
     void drainPageTranslationQueue()
 }
 
-function enqueuePagePlaceholderElement(element: PagePlaceholderElement, requireVisible = true) {
+function enqueuePagePlaceholderElement(element: Element, requireVisible = true) {
     if (
         !pageTranslationEnabled ||
-        pageTranslationPlaceholderQueued.has(element) ||
         !isPageTranslationPlaceholderCandidate(element)
     ) {
         return
     }
+    if (pageTranslationPlaceholderQueue.isQueued(element)) return
+
     if (requireVisible && !isPagePlaceholderVisible(element)) {
         observePagePlaceholderElement(element)
         return
@@ -1756,8 +1462,7 @@ function enqueuePagePlaceholderElement(element: PagePlaceholderElement, requireV
 
     pageTranslationObservedPlaceholders.delete(element)
     pageTranslationVisibilityObserver?.unobserve(element)
-    pageTranslationPlaceholderQueued.add(element)
-    pageTranslationPlaceholderQueue.push(element)
+    pageTranslationPlaceholderQueue.enqueue(element)
     pageTranslationDebug.queuedPlaceholders++
     updatePageTranslationStatus()
     void drainPageTranslationQueue()
@@ -1774,24 +1479,30 @@ function collectPageTextNodes(root: Node) {
     if (!(root instanceof Element) && !(root instanceof DocumentFragment)) return
     if (root instanceof Element && shouldSkipPageTranslationElement(root)) return
 
-    walkTextNodesDeep(root, node => {
-        if (isPageTranslationCandidate(node)) enqueuePageTextNode(node)
-    })
+    walkTextNodesDeep(root, node => enqueuePageTextNode(node))
 }
 
 function collectPagePlaceholderElements(root: Node) {
     if (!pageTranslationEnabled) return
     if (!(root instanceof Element) && !(root instanceof DocumentFragment)) return
 
-    if (root instanceof Element && isPageTranslationPlaceholderCandidate(root)) {
+    if (root instanceof Element) {
         enqueuePagePlaceholderElement(root)
     }
 
     if (root instanceof Element && shouldSkipPageTranslationPlaceholderElement(root)) return
 
-    root.querySelectorAll?.('input[placeholder], textarea[placeholder]').forEach(element => {
-        if (isPageTranslationPlaceholderCandidate(element)) enqueuePagePlaceholderElement(element)
-    })
+    root.querySelectorAll?.('input[placeholder], textarea[placeholder]').forEach(element => enqueuePagePlaceholderElement(element))
+}
+
+function resetPageTranslationActiveRescanDelay() {
+    pageTranslationActiveRescanDelay = PAGE_TRANSLATION_ACTIVE_RESCAN_INTERVAL_MS
+}
+
+function hasPendingPageTranslationWork(): boolean {
+    return pageTranslationTextQueue.hasPending() ||
+        pageTranslationPlaceholderQueue.hasPending() ||
+        pageTranslationMemory.hasActiveRequests()
 }
 
 function collectCurrentPageTranslationTargets() {
@@ -1800,6 +1511,7 @@ function collectCurrentPageTranslationTargets() {
     const root = document.body ?? document.documentElement
     if (!root) return
 
+    pageTranslationLastCollectAt = Date.now()
     pageTranslationDebug.collectRuns++
     observePageTranslationShadowRoots(root)
     collectPageTextNodes(root)
@@ -1817,6 +1529,7 @@ function clearPageTranslationMutationRescan() {
 function schedulePageTranslationMutationRescan() {
     if (!pageTranslationEnabled) return
 
+    resetPageTranslationActiveRescanDelay()
     clearPageTranslationMutationRescan()
     pageTranslationDebug.mutationRescansScheduled++
     pageTranslationMutationRescanTimer = window.setTimeout(() => {
@@ -1842,13 +1555,28 @@ function schedulePageTranslationActiveRescan() {
         pageTranslationActiveRescanTimer = null
         if (!pageTranslationEnabled) return
 
-        if (document.visibilityState === 'visible') {
+        const hasPendingWork = hasPendingPageTranslationWork()
+        const recentlyCollected = Date.now() - pageTranslationLastCollectAt < PAGE_TRANSLATION_ACTIVE_RESCAN_RECENT_COLLECT_MS
+        if (document.visibilityState === 'visible' && !hasPendingWork && !recentlyCollected) {
+            const queuedBefore = pageTranslationDebug.queuedText + pageTranslationDebug.queuedPlaceholders
             pageTranslationDebug.activeRescansRun++
             collectCurrentPageTranslationTargets()
+            const queuedAfter = pageTranslationDebug.queuedText + pageTranslationDebug.queuedPlaceholders
+
+            if (queuedAfter === queuedBefore && !hasPendingPageTranslationWork()) {
+                pageTranslationActiveRescanDelay = Math.min(
+                    Math.ceil(pageTranslationActiveRescanDelay * 1.5),
+                    PAGE_TRANSLATION_ACTIVE_RESCAN_MAX_INTERVAL_MS
+                )
+            } else {
+                resetPageTranslationActiveRescanDelay()
+            }
+        } else if (hasPendingWork) {
+            resetPageTranslationActiveRescanDelay()
         }
 
         schedulePageTranslationActiveRescan()
-    }, PAGE_TRANSLATION_ACTIVE_RESCAN_INTERVAL_MS)
+    }, pageTranslationActiveRescanDelay)
 }
 
 function observePageTranslationShadowRoots(root: Node) {
@@ -1901,26 +1629,23 @@ function handlePageTranslationMutations(mutations: MutationRecord[]) {
     for (const mutation of mutations) {
         if (mutation.type === 'characterData' && mutation.target instanceof Text) {
             enqueuePageTextNode(mutation.target)
-            shouldRescan = true
             continue
         }
 
         if (mutation.type === 'attributes' && mutation.target instanceof Element) {
-            if (mutation.attributeName === 'hidden' || mutation.attributeName === 'aria-hidden') {
+            const attributeName = mutation.attributeName
+            if (attributeName === 'hidden' || attributeName === 'aria-hidden') {
                 collectPageTextNodes(mutation.target)
+                collectPagePlaceholderElements(mutation.target)
+                shouldRescan = true
             }
             if (
-                mutation.attributeName === 'placeholder' ||
-                mutation.attributeName === 'type' ||
-                mutation.attributeName === 'class' ||
-                mutation.attributeName === 'style' ||
-                mutation.attributeName === 'hidden' ||
-                mutation.attributeName === 'aria-hidden'
+                attributeName === 'placeholder' ||
+                attributeName === 'type'
             ) {
                 collectPagePlaceholderElements(mutation.target)
             }
             scheduleObservedPageTextNodeCheck()
-            shouldRescan = true
             continue
         }
 
@@ -1962,13 +1687,13 @@ async function translatePageTextNode(node: Text, runId: number) {
 
     const sourceText = node.nodeValue ?? ''
     const {value} = splitPreservingWhitespace(sourceText)
-    const cached = pageTranslationCache.get(value)
+    const cached = pageTranslationMemory.getCached(value)
     if (cached) {
         applyPageTranslation(node, sourceText, cached)
         return
     }
 
-    const existingRequest = pageTranslationInflight.get(value)
+    const existingRequest = pageTranslationMemory.getActiveRequest(value)
     if (!existingRequest) showPageTextTranslationStatus(node, 'Translating...')
     try {
         const translated = await (existingRequest ?? translatePageValue(value))
@@ -2004,7 +1729,7 @@ async function translatePagePlaceholderElement(element: PagePlaceholderElement, 
 
     const sourceText = element.getAttribute('placeholder') ?? ''
     const {value} = splitPreservingWhitespace(sourceText)
-    const cached = pageTranslationCache.get(value)
+    const cached = pageTranslationMemory.getCached(value)
     if (cached) {
         applyPagePlaceholderTranslation(element, sourceText, cached)
         return
@@ -2027,10 +1752,7 @@ async function translatePagePlaceholderElement(element: PagePlaceholderElement, 
 }
 
 function updatePageTranslationStatus() {
-    const pendingCount = pageTranslationQueue.length +
-        pageTranslationActiveCount +
-        pageTranslationPlaceholderQueue.length +
-        pageTranslationPlaceholderActiveCount
+    const pendingCount = pageTranslationTextQueue.pendingCount + pageTranslationPlaceholderQueue.pendingCount
     getPageDeps().hideStatus('page')
     if (!pageTranslationEnabled || pendingCount === 0) {
         hidePageTextTranslationStatus()
@@ -2038,33 +1760,25 @@ function updatePageTranslationStatus() {
 }
 
 async function drainPageTranslationQueue() {
-    while (pageTranslationEnabled && pageTranslationActiveCount < PAGE_TRANSLATION_CONCURRENCY && pageTranslationQueue.length > 0) {
-        const node = pageTranslationQueue.shift()
-        if (!node) continue
+    while (pageTranslationEnabled) {
+        const node = pageTranslationTextQueue.startNext(PAGE_TRANSLATION_CONCURRENCY)
+        if (!node) break
 
-        pageTranslationQueued.delete(node)
-        pageTranslationActiveCount++
         updatePageTranslationStatus()
         void translatePageTextNode(node, pageTranslationRunId).finally(() => {
-            pageTranslationActiveCount = Math.max(0, pageTranslationActiveCount - 1)
+            pageTranslationTextQueue.complete()
             void drainPageTranslationQueue()
             updatePageTranslationStatus()
         })
     }
 
-    while (
-        pageTranslationEnabled &&
-        pageTranslationPlaceholderActiveCount < PAGE_TRANSLATION_CONCURRENCY &&
-        pageTranslationPlaceholderQueue.length > 0
-    ) {
-        const element = pageTranslationPlaceholderQueue.shift()
-        if (!element) continue
+    while (pageTranslationEnabled) {
+        const element = pageTranslationPlaceholderQueue.startNext(PAGE_TRANSLATION_CONCURRENCY)
+        if (!element) break
 
-        pageTranslationPlaceholderQueued.delete(element)
-        pageTranslationPlaceholderActiveCount++
         updatePageTranslationStatus()
         void translatePagePlaceholderElement(element, pageTranslationRunId).finally(() => {
-            pageTranslationPlaceholderActiveCount = Math.max(0, pageTranslationPlaceholderActiveCount - 1)
+            pageTranslationPlaceholderQueue.complete()
             void drainPageTranslationQueue()
             updatePageTranslationStatus()
         })
@@ -2093,6 +1807,7 @@ function restorePageTranslation() {
 function startPageTranslation(sourceLanguage?: DetectableLanguage | null) {
     setPageTranslationSourceOverride(sourceLanguage)
     ensurePageTranslationMutationObserver()
+    resetPageTranslationActiveRescanDelay()
     if (pageTranslationEnabled && pageTranslationObserver) {
         markPageTranslationRuntimeState('start-existing')
         schedulePageTranslationActiveRescan()
@@ -2109,9 +1824,8 @@ function startPageTranslation(sourceLanguage?: DetectableLanguage | null) {
     stopPageTranslationSuggestionObserver()
     hidePageTranslationPrompt()
     pageTranslationRunId++
-    pageTranslationCache.clear()
-    pageTranslationSkipCache.clear()
-    pageTranslationInflight.clear()
+    pageTranslationMemory.clearTranslations()
+    pageTranslationLastCollectAt = 0
 
     collectCurrentPageTranslationTargets()
     schedulePageTranslationActiveRescan()
@@ -2128,10 +1842,12 @@ function stopPageTranslation() {
     markPageTranslationRuntimeState('stop')
     pageTranslationEnabled = false
     pageTranslationRunId++
-    pageTranslationSourceOverride = null
-    pageTranslationQueue.length = 0
-    pageTranslationPlaceholderQueue.length = 0
-    pageTranslationInflight.clear()
+    pageTranslationMemory.clearSourceOverride()
+    pageTranslationTextQueue.clear()
+    pageTranslationPlaceholderQueue.clear()
+    pageTranslationMemory.clearActiveRequests()
+    resetPageTranslationActiveRescanDelay()
+    pageTranslationLastCollectAt = 0
     clearPageTranslationMutationRescan()
     clearPageTranslationActiveRescan()
     document.removeEventListener('scroll', handlePageTranslationViewportChange, true)

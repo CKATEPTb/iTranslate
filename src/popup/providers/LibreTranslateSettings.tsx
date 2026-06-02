@@ -1,4 +1,4 @@
-import {Component} from "nano-jsx";
+import {Component, type JsxChild} from '#mini-jsx'
 import {LibreKeyStore, LibreUrlStore} from "../../store.ts";
 
 
@@ -15,7 +15,7 @@ export class LibreTranslateSettings extends Component {
         this.libreKey.setState((event.target as HTMLInputElement).value)
     }
 
-    render(_update?: any): HTMLElement | void {
+    render(_update?: unknown): JsxChild {
 
         // "https://libretranslate.com/*",
         // "https://translate.argosopentech.com/*",

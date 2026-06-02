@@ -1,5 +1,3 @@
-import {detectAll as detectTinyLanguages} from 'tinyld/light'
-
 export type DetectableLanguage = 'en' | 'ru' | 'ua' | 'de' | 'fr'
 
 type LanguageCandidate = {
@@ -22,19 +20,6 @@ const LANGUAGE_ALIASES: Record<string, DetectableLanguage> = {
   fre: 'fr',
   fr: 'fr',
 }
-
-const TINY_LANGUAGE_ALIASES: Record<string, DetectableLanguage> = {
-  eng: 'en',
-  en: 'en',
-  rus: 'ru',
-  ru: 'ru',
-  deu: 'de',
-  de: 'de',
-  fra: 'fr',
-  fr: 'fr',
-}
-
-const TINY_LANGUAGES = ['en', 'ru', 'de', 'fr'] as const
 
 const RUSSIAN_WORDS = new Set([
   'а', 'без', 'был', 'была', 'были', 'быть', 'вам', 'вас', 'ведь', 'весь', 'во', 'вот', 'все',
@@ -70,10 +55,11 @@ const UKRAINIAN_DISTINCTIVE_WORDS = new Set([
 const ENGLISH_WORDS = new Set([
   'a', 'about', 'after', 'all', 'also', 'am', 'an', 'and', 'are', 'as', 'at', 'be', 'because',
   'been', 'being', 'but', 'by', 'can', 'did', 'do', 'does', 'for', 'from', 'had', 'has', 'have',
-  'he', 'her', 'his', 'i', 'if', 'in', 'is', 'it', 'its', "it's", 'me', 'my', 'not', 'of', 'on',
-  'or', 'our', 'she', 'so', 'that', 'the', 'their', 'them', 'then', 'there', 'this', 'they',
-  'to', 'was', 'we', 'were', 'what', 'when', 'where', 'which', 'who', 'will', 'with', 'you',
-  'your',
+  'he', 'hello', 'her', 'his', 'i', 'if', 'in', 'input', 'is', 'it', 'its', "it's", 'kind', 'may',
+  'me', 'miss', 'my', 'no', 'not', 'of', 'on', 'or', 'our', 'overall', 'page', 'she', 'so', 'software',
+  'still', 'system', 'text', 'thanks', 'thank', 'that', 'the', 'their', 'them', 'then', 'there', 'this',
+  'they', 'to', 'translate', 'translation', 'wait', 'was', 'we', 'well', 'were', 'what', 'when', 'where',
+  'which', 'who', 'will', 'with', 'working', 'yes', 'you', 'your',
 ])
 
 const GERMAN_WORDS = new Set([
@@ -104,45 +90,54 @@ function clamp(value: number): number {
 }
 
 function countMatches(text: string, pattern: RegExp): number {
-  return Array.from(text.matchAll(pattern)).length
+  if (!pattern.global && !pattern.sticky) return pattern.test(text) ? 1 : 0
+
+  let count = 0
+  pattern.lastIndex = 0
+  while (pattern.exec(text)) {
+    count++
+  }
+  pattern.lastIndex = 0
+  return count
 }
 
 function getLetterStats(text: string) {
-  const letters = Array.from(text.matchAll(/\p{L}/gu), match => match[0])
-  const cyrillic = letters.filter(letter => /\p{Script=Cyrillic}/u.test(letter)).length
-  const latin = letters.filter(letter => /\p{Script=Latin}/u.test(letter)).length
-  return {letters: letters.length, cyrillic, latin}
+  const letterPattern = /\p{L}/gu
+  const cyrillicPattern = /\p{Script=Cyrillic}/u
+  const latinPattern = /\p{Script=Latin}/u
+  let letters = 0
+  let cyrillic = 0
+  let latin = 0
+  let match: RegExpExecArray | null
+
+  while ((match = letterPattern.exec(text))) {
+    const letter = match[0]
+    letters++
+    if (cyrillicPattern.test(letter)) cyrillic++
+    else if (latinPattern.test(letter)) latin++
+  }
+
+  return {letters, cyrillic, latin}
 }
 
 function tokenizeWords(text: string): string[] {
-  return Array.from(text.toLowerCase().matchAll(/\p{L}[\p{L}'’-]*/gu), match => match[0])
+  const pattern = /\p{L}[\p{L}'’-]*/gu
+  const words: string[] = []
+  const normalized = text.toLowerCase()
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(normalized))) {
+    words.push(match[0])
+  }
+
+  return words
 }
 
 function scoreWords(words: string[], dictionary: Set<string>): number {
   return words.reduce((score, word) => score + (dictionary.has(word) ? 1 : 0), 0)
 }
 
-function getTinyCandidate(text: string): LanguageCandidate | null {
-  const ranked = detectTinyLanguages(text, {only: [...TINY_LANGUAGES]})
-    .map(({lang, accuracy}) => ({
-      language: TINY_LANGUAGE_ALIASES[lang.toLowerCase()],
-      accuracy,
-    }))
-    .filter((item): item is {language: DetectableLanguage; accuracy: number} => Boolean(item.language))
-    .sort((a, b) => b.accuracy - a.accuracy)
-
-  const top = ranked[0]
-  if (!top) return null
-
-  const secondAccuracy = ranked.find(item => item.language !== top.language)?.accuracy ?? 0
-  const margin = top.accuracy - secondAccuracy
-  const confidence = clamp(top.accuracy * 1.8 + margin * 1.2)
-
-  if (top.accuracy < 0.05 && margin < 0.04) return null
-  return {language: top.language, confidence}
-}
-
-function buildCyrillicCandidate(text: string, words: string[], tinyCandidate: LanguageCandidate | null): LanguageCandidate | null {
+function buildCyrillicCandidate(text: string, words: string[]): LanguageCandidate | null {
   const lower = text.toLowerCase()
   const ruDistinctChars = countMatches(lower, /[ыэёъ]/gu)
   const uaDistinctChars = countMatches(lower, /[іїєґ]/gu)
@@ -151,15 +146,15 @@ function buildCyrillicCandidate(text: string, words: string[], tinyCandidate: La
   const ruDistinctWords = scoreWords(words, RUSSIAN_DISTINCTIVE_WORDS)
   const uaDistinctWords = scoreWords(words, UKRAINIAN_DISTINCTIVE_WORDS)
 
-  const tinyRuBoost = tinyCandidate?.language === 'ru'
-    ? Math.min(uaDistinctChars + uaDistinctWords === 0 ? 0.58 : 0.42, tinyCandidate.confidence * 0.58)
+  const ruScriptFallback = uaDistinctChars + uaDistinctWords === 0 && (ruDistinctWords > 0 || ruWords > uaWords)
+    ? 0.42
     : 0
 
   const ruScore =
     Math.min(0.55, ruDistinctChars * 0.32) +
     Math.min(0.55, ruDistinctWords * 0.18) +
-    Math.min(0.25, ruWords * 0.05) +
-    tinyRuBoost
+    Math.min(0.35, ruWords * 0.07) +
+    ruScriptFallback
 
   const uaScore =
     Math.min(0.78, uaDistinctChars * 0.42) +
@@ -179,8 +174,13 @@ function buildCyrillicCandidate(text: string, words: string[], tinyCandidate: La
   return null
 }
 
-function buildLatinCandidate(text: string, words: string[], tinyCandidate: LanguageCandidate | null): LanguageCandidate | null {
+function buildLatinCandidate(text: string, words: string[]): LanguageCandidate | null {
   const lower = text.toLowerCase()
+  const wordMatches: Record<'en' | 'de' | 'fr', number> = {
+    en: 0,
+    de: 0,
+    fr: 0,
+  }
   const scores: Record<'en' | 'de' | 'fr', number> = {
     en: 0,
     de: countMatches(lower, /[äöüß]/gu) * 0.38,
@@ -188,11 +188,8 @@ function buildLatinCandidate(text: string, words: string[], tinyCandidate: Langu
   }
 
   for (const language of Object.keys(scores) as Array<'en' | 'de' | 'fr'>) {
-    scores[language] += Math.min(0.62, scoreWords(words, LATIN_WORD_SETS[language]) * 0.16)
-  }
-
-  if (tinyCandidate?.language === 'en' || tinyCandidate?.language === 'de' || tinyCandidate?.language === 'fr') {
-    scores[tinyCandidate.language] += Math.min(0.62, tinyCandidate.confidence * 0.62)
+    wordMatches[language] = scoreWords(words, LATIN_WORD_SETS[language])
+    scores[language] += Math.min(0.62, wordMatches[language] * 0.16)
   }
 
   const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]) as Array<[DetectableLanguage, number]>
@@ -200,12 +197,12 @@ function buildLatinCandidate(text: string, words: string[], tinyCandidate: Langu
   const [, secondScore] = ranked[1]
   const margin = bestScore - secondScore
 
-  if (bestScore >= 0.58 && margin >= 0.12) {
+  if (bestScore >= 0.48 && margin >= 0.12) {
     return {language: bestLanguage, confidence: clamp(bestScore)}
   }
 
-  if (tinyCandidate?.language === bestLanguage && tinyCandidate.confidence >= 0.62 && margin >= 0.06) {
-    return {language: bestLanguage, confidence: clamp(bestScore)}
+  if (bestLanguage === 'en' && wordMatches.en >= 3 && margin >= 0.08) {
+    return {language: 'en', confidence: clamp(Math.max(bestScore, 0.5))}
   }
 
   return null
@@ -219,12 +216,11 @@ function detectTextLanguageCandidate(text: string): LanguageCandidate | null {
   if (stats.letters < 3) return null
 
   const words = tokenizeWords(trimmed)
-  const tinyCandidate = getTinyCandidate(trimmed)
   const cyrillicRatio = stats.cyrillic / stats.letters
   const latinRatio = stats.latin / stats.letters
 
-  if (cyrillicRatio >= 0.6) return buildCyrillicCandidate(trimmed, words, tinyCandidate)
-  if (latinRatio >= 0.6) return buildLatinCandidate(trimmed, words, tinyCandidate)
+  if (cyrillicRatio >= 0.6) return buildCyrillicCandidate(trimmed, words)
+  if (latinRatio >= 0.6) return buildLatinCandidate(trimmed, words)
 
   return null
 }

@@ -1,7 +1,7 @@
-import {Component} from "nano-jsx";
+import {Component, type JsxChild} from '#mini-jsx'
 
 export class MyMemorySettings extends Component {
-    render(_update?: any): HTMLElement | void {
+    render(_update?: unknown): JsxChild {
         return <></>
     }
 }

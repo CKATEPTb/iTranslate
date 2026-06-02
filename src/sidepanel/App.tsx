@@ -1,4 +1,4 @@
-import {Component, Store} from 'nano-jsx'
+import {Component, Store} from '#mini-jsx'
 import {SidePanelFromStore, SidePanelProviderStore, SidePanelThemeStore, SidePanelToStore} from '../store.ts'
 import {DEFAULT_PROVIDER, isKnownProvider, normalizeProvider, TRANSLATION_PROVIDERS} from '../providers.ts'
 
@@ -101,8 +101,10 @@ export class App extends Component {
         }
     }
 
-    didMount(): any {
-        const update = (n: any, p: any) => { if (n !== p) this.update() }
+    didMount(): void {
+        const update = (newState: unknown, prevState: unknown) => {
+            if (newState !== prevState) this.update()
+        }
         this.provider.subscribe(update)
         this.from.subscribe(update)
         this.to.subscribe(update)
@@ -119,7 +121,7 @@ export class App extends Component {
         this.applyTheme(this.theme.state as string)
     }
 
-    didUnmount(): any {
+    didUnmount(): void {
         this.provider.cancel()
         this.from.cancel()
         this.to.cancel()
@@ -153,7 +155,7 @@ export class App extends Component {
 
     private onInput(value: string) {
         this.inputText = value
-        // Cancel any running translation immediately
+        // Cancel in-flight translation immediately
         this.cancelTranslate()
         if (!value.trim()) {
             resultStore.setState('')

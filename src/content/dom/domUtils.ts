@@ -134,7 +134,13 @@ export function isElementVisibleForSelection(element: Element): boolean {
 }
 
 export function getVisibleSelectionRangeRects(range: Range): DOMRect[] {
-    return Array.from(range.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0)
+    const rects: DOMRect[] = []
+    for (const rect of range.getClientRects()) {
+        if (rect.width > 0 && rect.height > 0) {
+            rects.push(rect)
+        }
+    }
+    return rects
 }
 
 export function rectsOverlap(a: DOMRect, b: DOMRect): boolean {
@@ -155,7 +161,9 @@ export function selectionRangeIntersectsNode(range: Range, node: Node): boolean 
 
 export function getTextNodesInSelectionRange(range: Range): Text[] {
     const root = range.commonAncestorContainer
-    if (root.nodeType === Node.TEXT_NODE) return [root as Text].filter(node => selectionRangeIntersectsNode(range, node))
+    if (root.nodeType === Node.TEXT_NODE) {
+        return selectionRangeIntersectsNode(range, root) ? [root as Text] : []
+    }
 
     const nodes: Text[] = []
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -504,7 +512,10 @@ export function getTextNodeVisibleRect(
     const range = document.createRange()
     try {
         range.selectNodeContents(node)
-        return Array.from(range.getClientRects()).find(rectIntersectsViewport) ?? null
+        for (const rect of range.getClientRects()) {
+            if (rectIntersectsViewport(rect)) return rect
+        }
+        return null
     } catch {
         const rect = parent.getBoundingClientRect()
         return rectIntersectsViewport(rect) ? rect : null

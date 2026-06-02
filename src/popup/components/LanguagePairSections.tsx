@@ -1,9 +1,9 @@
-import {Component} from 'nano-jsx'
+import {Component, type JsxChild} from '#mini-jsx'
 
 type Store = {
-    readonly state: any
-    setState: (newState: any) => void
-    subscribe: (fnc: (newState: any, prevState: any) => void) => void
+    readonly state: string
+    setState: (newState: string) => void
+    subscribe: (fnc: (newState: string, prevState: string) => void) => void
     cancel: () => void
 }
 
@@ -27,7 +27,7 @@ export class LanguagePairSection extends Component<LanguagePairSectionProps> {
         const prevTo = this.props.toStore.state
 
         this.props.fromStore.setState(nextFrom)
-        if (nextFrom == prevTo) {
+        if (nextFrom === prevTo) {
             this.props.toStore.setState(prevFrom === 'auto' ? getFallbackTargetLanguage(nextFrom) : prevFrom)
             this.update()
         }
@@ -39,13 +39,13 @@ export class LanguagePairSection extends Component<LanguagePairSectionProps> {
         const prevTo = this.props.toStore.state
 
         this.props.toStore.setState(nextTo)
-        if (nextTo == prevFrom) {
+        if (nextTo === prevFrom) {
             this.props.fromStore.setState(prevTo)
             this.update()
         }
     }
 
-    render(): HTMLElement | void {
+    render(): JsxChild {
         const {title, fromStore, toStore} = this.props
 
         return (
@@ -55,7 +55,7 @@ export class LanguagePairSection extends Component<LanguagePairSectionProps> {
                     <select onchange={this.onChangeFrom.bind(this)}
                             class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 pl-2 pr-6 py-2 text-slate-900 dark:text-slate-100">
                         {sourceLanguages.map(language => {
-                            if (language == fromStore.state) {
+                            if (language === fromStore.state) {
                                 return <option value={language} selected>{language}</option>
                             }
                             return <option value={language}>{language}</option>
@@ -64,7 +64,7 @@ export class LanguagePairSection extends Component<LanguagePairSectionProps> {
                     <select onchange={this.onChangeTo.bind(this)}
                             class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 pl-2 pr-6 py-2 text-slate-900 dark:text-slate-100">
                         {targetLanguages.map(language => {
-                            if (language == toStore.state) {
+                            if (language === toStore.state) {
                                 return <option value={language} selected>{language}</option>
                             }
                             return <option value={language}>{language}</option>

@@ -1,113 +1,148 @@
-## iTranslate — Fast & Free Text Translation in Your Browser
+# iTranslate
 
-**iTranslate** is a lightweight and convenient extension for Chromium-based browsers that allows you to instantly translate selected text on web pages or any text you type manually.
+iTranslate is a Chromium extension for fast text and page translation. It can translate selected text, focused input fields, the side panel text box, and full web pages with configurable translation providers.
 
-The extension supports multiple translation providers and works quickly without opening additional tabs or switching between websites.
+Version: 1.4.0
 
----
+## Highlights
 
-## Features
+- Translate selected text directly on the page.
+- Translate focused input, textarea, and contenteditable text with a keyboard shortcut.
+- Translate text manually in the side panel with local history.
+- Suggest page translation when visible page content does not match the target language.
+- Translate only visible page content and continue translating later page updates.
+- Translate input and textarea placeholders during page translation.
+- Show original page text in a copyable tooltip after a short hover delay.
+- Detect source language automatically for selection, input, side panel, and page translation.
+- Split large translation requests into chunks up to 32 KB.
+- Keep a compact popup UI with dark and light themes.
 
-### ⚡ Instant translation of selected text
+## Translation Providers
 
-Simply select any text on a webpage and the translation will appear instantly.
-No need to copy text or open a translator in a new tab.
+The extension supports these providers:
 
-### ⌨️ Translate typed text using a hotkey
+- Google
+- DeepL
+- Lingvanex
+- Lara
+- LibreTranslate
+- MyMemory
+- OpenAI-compatible providers, including Ollama
 
-Type any text and press your configured hotkey — the extension will translate it instantly.
+Page translation is available for:
 
-Hotkeys can be customized in the browser’s extension shortcut settings.
+- Google
+- Lingvanex
+- OpenAI-compatible providers
+- DeepL when an API key is configured
+- LibreTranslate when an API key is configured
 
-### 🌐 Multiple translation providers
+Page translation is intentionally unavailable for providers that are more likely to hit rate limits without an API-backed setup.
 
-Choose the translation service that works best for you:
+## Supported Languages
 
-* Google Translate
-* DeepL
-* Lingvanex
-* Lara
-* LibreTranslate
-* MyMemory
-* OpenAI / Ollama
+- Auto detect source language
+- English
+- Russian
+- Ukrainian
+- German
+- French
 
-This allows you to balance **translation quality, speed, and privacy**.
+## Page Translation
 
-### 🌍 Supported languages
+iTranslate can offer to translate a page automatically when enough visible text appears to be in a language different from your target language. The prompt includes:
 
-* English
-* Ukrainian
-* Russian
-* German
-* French
+- Translate page
+- Never translate this site
+- Always translate from the detected language
 
----
+The prompt closes automatically if you do not interact with it. Hovering the prompt pauses the timer.
 
-## Advantages
+When page translation is active, the extension observes the document, open shadow roots, and all extension-accessible frames. New or changed visible text is translated without requiring a page reload. If content updates but the actual text did not change, the extension avoids sending another translation request.
 
-* instant translation of selected text
-* translate typed text using hotkeys
-* multiple translation providers
-* support for local AI models via Ollama
-* customizable keyboard shortcuts
-* completely free to use
+You can manage page translation rules from the popup by opening the Page translation rules button above the provider selector.
 
----
+## Original Text Tooltip
+
+Translated page text keeps its original value. Hover translated page text briefly to open a copyable tooltip with the original text.
+
+Selection translation and error details also use copyable tooltips, so messages can be selected and copied when needed.
+
+## Provider Settings
+
+Open the popup to configure:
+
+- Translation provider
+- Selection language pair
+- Input language pair
+- Provider-specific settings such as API keys, base URLs, models, and prompts
+- Page translation rule management
+- Theme
+
+The popup marks whether the selected provider supports page translation, requires an API key for page translation, or is limited to selection/input translation.
+
+## Side Panel
+
+The side panel provides a dedicated translation workspace with:
+
+- Provider selection
+- Auto source language
+- Target language selection
+- Translation history
+- Copyable results
+- Dark and light theme support
+
+## Keyboard Shortcut
+
+The default shortcut for focused input translation is `Alt+A`.
+
+To change it:
+
+1. Open `chrome://extensions/shortcuts`.
+2. Find `iTranslate`.
+3. Change the shortcut for `translate-focused-input`.
+
+## Install From Release
+
+1. Download the latest release archive from the GitHub Releases page.
+2. Extract the archive.
+3. Open `chrome://extensions/`.
+4. Enable Developer mode.
+5. Click Load unpacked.
+6. Select the extracted extension folder.
+
+## Build Locally
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run a production build:
+
+```bash
+npm run build
+```
+
+Run the release check:
+
+```bash
+npm run check
+```
+
+The built extension is written to `dist/`.
 
 ## Privacy
 
-The extension **does not collect or store user data**.
-Translations are processed through the provider you choose.
+iTranslate does not collect analytics or store user activity on a remote server.
 
----
-
-## How to install
-
-1. Download the latest archive from [Release](https://github.com/CKATEPTb/iTranslate/releases)
-2. Extract the archive to any convenient folder on your computer.
-3. Open `chrome://extensions/` (or your Chromium browser extensions page).
-4. Enable **Developer mode**.
-5. Click **Load unpacked** and select the extracted extension folder.
-
----
-
-## How to use
-
-### Translate selected text
-
-1. Open any website.
-2. Select text with your mouse.
-3. Wait a moment for the tooltip translation to appear.
-
-### Translate typed text
-
-1. Focus an input field, textarea, or contenteditable area.
-2. Type text (or select part of typed text).
-3. Press the extension hotkey (default: `Alt+A`).
-4. The selected text (or full input text) will be replaced with translation.
-
-### Configure providers
-
-1. Click the extension icon to open popup settings.
-2. Select translation provider.
-3. Set language pairs for selected text and input text.
-4. Fill provider-specific settings (API key, URL, model, prompt) if required.
-
-### Change hotkeys
-
-1. Open `chrome://extensions/shortcuts`.
-2. Find **iTranslate**.
-3. Change the shortcut for `translate-focused-input`.
-
+Text is sent to the translation provider you select. API keys and extension settings are stored with Chrome extension storage.
 
 ## License
 
-### This project is licensed under the LGPL-3.0-only License.
-
-See the LICENSE.md file for details.
+This project is licensed under the LGPL-3.0-only license. See `LICENSE.md` for details.
 
 ## Author
 
-### [CKATEPTb](https://github.com/CKATEPTb)
-
-Feel free to open issues and submit pull requests to improve the library!
+[CKATEPTb](https://github.com/CKATEPTb)
