@@ -348,8 +348,9 @@ export class App extends Component {
                 {/* Input — grows to fill half the remaining space */}
                 <textarea
                     id="sp-input"
-                    class="flex-1 min-h-0 w-full rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 overflow-y-auto"
+                    class="itranslate-wrap-text flex-1 min-h-0 w-full rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 overflow-y-auto overflow-x-hidden"
                     placeholder="Enter text to translate..."
+                    wrap="soft"
                     oninput={({target}: {target: HTMLTextAreaElement}) => this.onInput(target.value)}
                 />
 
