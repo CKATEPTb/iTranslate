@@ -8,7 +8,7 @@ type TranslationOutputProps = {
 
 export function TranslationOutput({error, loading, result}: TranslationOutputProps) {
     return (
-        <div class="itranslate-wrap-text flex-1 min-h-0 rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm whitespace-pre-wrap overflow-y-auto overflow-x-hidden">
+        <div class="itranslate-wrap-text flex-1 min-w-0 max-w-full min-h-0 rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 text-sm whitespace-pre-wrap overflow-y-auto overflow-x-hidden">
             {error
                 ? <span class="text-red-500 dark:text-red-400">{error}</span>
                 : loading

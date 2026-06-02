@@ -14,10 +14,10 @@ type HistoryPanelProps = {
 export function HistoryPanel({entries, show, formatTime, onClear, onDelete, onLoad, onToggle}: HistoryPanelProps) {
     return (
         <>
-            <div class="flex items-center justify-between gap-2 flex-shrink-0">
+            <div class="flex min-w-0 max-w-full items-center justify-between gap-2 flex-shrink-0">
                 <button
                     onclick={() => onToggle()}
-                    class="group inline-flex h-8 min-w-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400 dark:hover:border-blue-500 dark:hover:text-blue-400"
+                    class="group inline-flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 transition hover:border-blue-400 hover:text-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400 dark:hover:border-blue-500 dark:hover:text-blue-400"
                     title={show ? 'Hide history' : 'Show history'}
                     aria-label={show ? 'Hide history' : 'Show history'}
                 >
@@ -42,7 +42,7 @@ export function HistoryPanel({entries, show, formatTime, onClear, onDelete, onLo
             </div>
 
             {show && (
-                <div class="flex flex-col gap-2 max-h-60 overflow-y-auto pr-1 flex-shrink-0">
+                <div class="flex min-w-0 max-w-full flex-col gap-2 max-h-60 overflow-y-auto overflow-x-hidden pr-1 flex-shrink-0">
                     {entries.length === 0
                         ? <p class="text-xs text-slate-400 dark:text-slate-500 text-center py-6">No history yet</p>
                         : entries.map(entry => (
@@ -70,7 +70,7 @@ type HistoryCardProps = {
 function HistoryCard({entry, formatTime, onDelete, onLoad}: HistoryCardProps) {
     return (
         <div
-            class="min-w-0 rounded-lg border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-2.5 cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition"
+            class="min-w-0 max-w-full overflow-hidden rounded-lg border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-2.5 cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition"
             onclick={() => onLoad(entry)}
         >
             <div class="flex min-w-0 items-center gap-2 mb-1.5">
@@ -91,8 +91,8 @@ function HistoryCard({entry, formatTime, onDelete, onLoad}: HistoryCardProps) {
                     <TrashIcon size={12}/>
                 </button>
             </div>
-            <p class="text-xs text-slate-500 dark:text-slate-400 truncate">{entry.source}</p>
-            <p class="text-xs text-slate-800 dark:text-slate-200 truncate font-medium">{entry.result}</p>
+            <p class="max-w-full text-xs text-slate-500 dark:text-slate-400 truncate">{entry.source}</p>
+            <p class="max-w-full text-xs text-slate-800 dark:text-slate-200 truncate font-medium">{entry.result}</p>
         </div>
     )
 }

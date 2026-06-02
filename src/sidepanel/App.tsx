@@ -292,11 +292,11 @@ export class App extends Component {
         const provider = normalizeProvider(this.provider.state)
 
         return (
-            <div class="h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 p-3 flex flex-col gap-3 text-sm overflow-hidden">
+            <div class="h-screen min-w-0 max-w-full bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 p-3 flex flex-col gap-3 text-sm overflow-hidden">
 
                 {/* Provider + languages + theme toggle */}
-                <section class="rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 flex flex-col gap-2 flex-shrink-0">
-                    <div class="flex items-center gap-2">
+                <section class="min-w-0 max-w-full rounded-xl border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-3 flex flex-col gap-2 flex-shrink-0 overflow-hidden">
+                    <div class="flex min-w-0 items-center gap-2">
                         <span class="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide flex-1">Translator</span>
                         <button
                             onclick={() => this.toggleTheme()}
@@ -318,7 +318,7 @@ export class App extends Component {
                         )}
                     </select>
 
-                    <div class="flex items-center gap-2">
+                    <div class="flex min-w-0 items-center gap-2">
                         <select class={SELECT_CLASS} onchange={this.onChangeFrom.bind(this)}>
                             {SOURCE_LANGS.map(l =>
                                 l === from
@@ -355,7 +355,7 @@ export class App extends Component {
                 />
 
                 {/* Buttons */}
-                <div class="flex gap-2 flex-shrink-0">
+                <div class="flex min-w-0 gap-2 flex-shrink-0">
                     <button
                         onclick={() => loading ? this.cancelTranslate() : this.translateNow()}
                         class={`flex-1 rounded-lg text-white px-3 py-1.5 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${loading ? 'bg-red-500 hover:bg-red-400' : 'bg-blue-600 hover:bg-blue-500'}`}

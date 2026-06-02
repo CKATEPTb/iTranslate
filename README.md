@@ -2,9 +2,13 @@
 
 iTranslate is a Chromium extension for fast text and page translation. It can translate selected text, focused input fields, the side panel text box, and full web pages with configurable translation providers.
 
-Version: 1.4.3
+Version: 1.4.4
 
 ## Release Notes
+
+### 1.4.4
+
+- Fixed side panel wrapping so long input, output, and history text no longer stretches the sidebar.
 
 ### 1.4.3
 
