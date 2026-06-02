@@ -1,4 +1,4 @@
-import {Component} from "nano-jsx";
+import {Component, type JsxChild} from '#mini-jsx'
 import {GoogleKeyStore} from "../../store.ts";
 
 
@@ -9,7 +9,7 @@ export class GoogleSettings extends Component {
         this.googleKey.setState((event.target as HTMLInputElement).value)
     }
 
-    render(_update?: any): HTMLElement | void {
+    render(_update?: unknown): JsxChild {
         return <label class="grid gap-1">
             <span class="text-slate-500 dark:text-slate-300">API key (optional)</span>
             <input value={this.googleKey.state} oninput={this.onChange.bind(this)} type="password"

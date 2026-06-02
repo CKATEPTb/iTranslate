@@ -8,7 +8,7 @@ export class DeepLTranslator implements Translator {
             const translator = new FreeDeepLTranslator();
             const result = await translator.translate({
                 text: context.text,
-                from: mapLanguageCode(context.from).toLowerCase(),
+                from: context.from === 'auto' ? '' : mapLanguageCode(context.from).toLowerCase(),
                 to: mapLanguageCode(context.to).toLowerCase()
             });
 
@@ -19,7 +19,9 @@ export class DeepLTranslator implements Translator {
         const body = new URLSearchParams()
         body.set('text', context.text)
         body.set('target_lang', mapLanguageCode(context.to).toUpperCase())
-        body.set('source_lang', mapLanguageCode(context.from).toUpperCase())
+        if (context.from !== 'auto') {
+            body.set('source_lang', mapLanguageCode(context.from).toUpperCase())
+        }
 
         const response = await fetch('https://api-free.deepl.com/v2/translate', {
             method: 'POST',

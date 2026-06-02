@@ -1,4 +1,4 @@
-import {Component} from "nano-jsx";
+import {Component, type JsxChild} from '#mini-jsx'
 import {OpenAIKeyStore, OpenAIModelStore, OpenAIPromptStore, OpenAIURLStore} from "../../store.ts";
 
 export class OpenAISettings extends Component {
@@ -23,7 +23,7 @@ export class OpenAISettings extends Component {
         this.openAIPrompt.setState((event.target as HTMLTextAreaElement).value)
     }
 
-    render(_update?: any): HTMLElement | void {
+    render(_update?: unknown): JsxChild {
         const fieldClass = "rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-2 py-2 text-slate-900 dark:text-slate-100"
         const labelClass = "text-slate-500 dark:text-slate-300"
         return <>

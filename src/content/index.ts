@@ -1,317 +1,281 @@
-import {autoUpdate, computePosition, flip, offset, shift, type VirtualElement} from '@floating-ui/dom'
+import {getVisibleSelectionExtract} from './dom/domUtils'
+import {InputTranslationController} from './input/InputTranslationController'
+import {PageTranslationService} from './page/PageTranslationService'
+import {SelectionTranslationController} from './selection/SelectionTranslationController'
+import {FloatingTooltip, type TooltipController} from './ui/FloatingTooltip'
 
-type TranslateMode = 'selection' | 'input'
-type TranslateResponse = { ok: true; translatedText: string } | { ok: false; error?: string }
-type TooltipController = { show(text: string, getRect: () => DOMRect): void; hide(): void; isVisible(): boolean }
+type TranslateMode = 'selection' | 'input' | 'page'
+type DetectableLanguage = 'en' | 'ru' | 'ua' | 'de' | 'fr'
+type TranslateResponse = { ok: true; translatedText: string; skipped?: boolean } | { ok: false; error?: string }
+type TranslatePrecheckResponse = { ok: true; skipped: boolean } | { ok: false; error?: string }
+type RuntimeMessageResult<T> = {response?: T; error?: string; contextInvalidated?: boolean}
 
-const TOOLTIP_ID = 'itranslate-tooltip'
-const DELAY_MS = 400
-const MAX_GAP_PX = 96
-const INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'email', 'password'])
-const MIDDLEWARE = [offset(10), flip({padding: 8}), shift({padding: 8})]
+const STATUS_ID = 'itranslate-status'
+const STATUS_STYLE_ID = 'itranslate-status-style'
+let extensionContextValid = true
+let pageTranslationService: PageTranslationService | null = null
+let sharedTooltip: TooltipController | null = null
 
-const translate = (text: string, mode: TranslateMode): Promise<string | null> =>
-    new Promise(resolve =>
-        chrome.runtime.sendMessage({type: 'TRANSLATE_TEXT', text, mode}, (r: TranslateResponse | undefined) =>
-            resolve(!chrome.runtime.lastError && r?.ok && typeof r.translatedText === 'string' ? r.translatedText : null)
-        )
-    )
+function isExtensionContextInvalidatedError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
+    return /extension context invalidated/i.test(message)
+}
 
-const fireInput = (el: HTMLElement) => {
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
-        Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, el.value)
+function deactivateExtensionContext() {
+    if (!extensionContextValid) return
+
+    extensionContextValid = false
+    try {
+        pageTranslationService?.handleRuntimeInvalidated()
+        hideTranslationStatus('input')
+        hideTranslationStatus('page')
+    } catch {
+        // The old content script is being detached; keep teardown best-effort.
     }
-    el.dispatchEvent(new InputEvent('input', {bubbles: true, cancelable: true, inputType: 'insertText'}))
-    el.dispatchEvent(new Event('change', {bubbles: true}))
 }
 
-function getDeepActiveElement(root: Document | ShadowRoot = document): Element | null {
-    const active = root.activeElement
-    if (!active) return null
-    return active.shadowRoot ? getDeepActiveElement(active.shadowRoot) : active
+function handleExtensionContextError(error: unknown): boolean {
+    if (!isExtensionContextInvalidatedError(error)) return false
+
+    deactivateExtensionContext()
+    return true
 }
 
-const getEditable = (): HTMLElement | null => {
-    const el = getDeepActiveElement()
-    if (!(el instanceof HTMLElement)) return null
-    if (el instanceof HTMLTextAreaElement) return el
-    if (el instanceof HTMLInputElement && !el.disabled && !el.readOnly && INPUT_TYPES.has(el.type)) return el
-    if (el.isContentEditable) return el
-    if (el.hasAttribute('contenteditable') && el.getAttribute('contenteditable') !== 'false') return el
+function hasExtensionContext(): boolean {
+    try {
+        return extensionContextValid && typeof chrome !== 'undefined' && !!chrome.runtime?.id
+    } catch (error) {
+        handleExtensionContextError(error)
+        return false
+    }
+}
+
+function sendRuntimeMessage<T>(message: unknown): Promise<RuntimeMessageResult<T>> {
+    return new Promise(resolve => {
+        if (!hasExtensionContext()) {
+            deactivateExtensionContext()
+            resolve({contextInvalidated: true, error: 'Extension context invalidated'})
+            return
+        }
+
+        try {
+            chrome.runtime.sendMessage(message, (response: T | undefined) => {
+                try {
+                    const lastError = chrome.runtime.lastError
+                    if (lastError) {
+                        const error = lastError.message
+                        resolve({
+                            error,
+                            contextInvalidated: handleExtensionContextError(error),
+                        })
+                        return
+                    }
+                } catch (error) {
+                    resolve({
+                        error: error instanceof Error ? error.message : String(error),
+                        contextInvalidated: handleExtensionContextError(error),
+                    })
+                    return
+                }
+
+                resolve({response})
+            })
+        } catch (error) {
+            resolve({
+                error: error instanceof Error ? error.message : String(error),
+                contextInvalidated: handleExtensionContextError(error),
+            })
+        }
+    })
+}
+
+const translateWithResponse = async (
+    text: string,
+    mode: TranslateMode,
+    fromOverride?: string,
+): Promise<TranslateResponse> => {
+    const result = await sendRuntimeMessage<TranslateResponse>({type: 'TRANSLATE_TEXT', text, mode, fromOverride})
+    if (result.contextInvalidated) return {ok: false, error: 'Extension context invalidated'}
+    if (result.error) return {ok: false, error: result.error}
+    return result.response ?? {ok: false, error: 'Translation failed'}
+}
+
+const precheckTranslateWithResponse = async (text: string, mode: TranslateMode): Promise<TranslatePrecheckResponse> => {
+    const result = await sendRuntimeMessage<TranslatePrecheckResponse>({type: 'TRANSLATE_TEXT_PRECHECK', text, mode})
+    if (result.contextInvalidated) return {ok: false, error: 'Extension context invalidated'}
+    if (result.error) return {ok: false, error: result.error}
+    return result.response ?? {ok: false, error: 'Translation precheck failed'}
+}
+
+const translate = async (text: string, mode: TranslateMode): Promise<string | null> => {
+    const response = await translateWithResponse(text, mode)
+    return response.ok && !response.skipped && typeof response.translatedText === 'string' ? response.translatedText : null
+}
+
+type TranslationStatusKey = 'input' | 'page'
+
+const translationStatuses = new Map<TranslationStatusKey, string>()
+
+let translationStatusEl: HTMLElement | null = null
+let translationStatusTextEl: HTMLElement | null = null
+let translationStatusHideTimer: number | null = null
+function ensureTranslationStatus() {
+    if (!document.getElementById(STATUS_STYLE_ID)) {
+        const style = document.createElement('style')
+        style.id = STATUS_STYLE_ID
+        style.textContent = `@keyframes itranslate-spin{to{transform:rotate(360deg)}}#${STATUS_ID}{position:fixed;right:16px;bottom:16px;z-index:2147483647;display:none;align-items:center;gap:8px;max-width:min(320px,calc(100vw - 32px));padding:9px 12px;border-radius:12px;background:rgba(15,23,42,.88);color:#f8fafc;border:1px solid rgba(255,255,255,.14);box-shadow:0 12px 32px rgba(15,23,42,.32);font:13px/1.35 -apple-system,"Segoe UI",sans-serif;pointer-events:none;backdrop-filter:blur(16px) saturate(160%);-webkit-backdrop-filter:blur(16px) saturate(160%)}#${STATUS_ID} .itranslate-status-spinner{width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:999px;animation:itranslate-spin .75s linear infinite;flex:0 0 auto}#${STATUS_ID} .itranslate-status-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}`
+        document.documentElement.appendChild(style)
+    }
+
+    if (translationStatusEl?.isConnected && translationStatusTextEl?.isConnected) return
+
+    const el = document.createElement('div')
+    el.id = STATUS_ID
+    el.setAttribute('role', 'status')
+    el.setAttribute('aria-live', 'polite')
+
+    const spinner = document.createElement('span')
+    spinner.className = 'itranslate-status-spinner'
+
+    const text = document.createElement('span')
+    text.className = 'itranslate-status-text'
+
+    el.append(spinner, text)
+    document.documentElement.appendChild(el)
+    translationStatusEl = el
+    translationStatusTextEl = text
+}
+
+function renderTranslationStatus() {
+    if (translationStatuses.size === 0) {
+        if (translationStatusHideTimer !== null) clearTimeout(translationStatusHideTimer)
+        translationStatusHideTimer = window.setTimeout(() => {
+            if (translationStatusEl) translationStatusEl.style.display = 'none'
+        }, 150)
+        return
+    }
+
+    ensureTranslationStatus()
+    if (translationStatusHideTimer !== null) {
+        clearTimeout(translationStatusHideTimer)
+        translationStatusHideTimer = null
+    }
+
+    const messages = Array.from(translationStatuses.values())
+    if (translationStatusTextEl) {
+        translationStatusTextEl.textContent = messages.length > 1 ? 'Please wait, translating...' : messages[0]
+    }
+    if (translationStatusEl) {
+        translationStatusEl.style.display = 'flex'
+    }
+}
+
+function showTranslationStatus(key: TranslationStatusKey, message: string) {
+    translationStatuses.set(key, message)
+    renderTranslationStatus()
+}
+
+function hideTranslationStatus(key: TranslationStatusKey) {
+    translationStatuses.delete(key)
+    renderTranslationStatus()
+}
+
+function getSharedTooltip(): TooltipController {
+    sharedTooltip ??= new FloatingTooltip(handleExtensionContextError)
+    return sharedTooltip
+}
+
+function normalizeDetectableLanguage(language: unknown): DetectableLanguage | null {
+    if (typeof language !== 'string') return null
+
+    const normalized = language.trim().toLowerCase()
+    if (normalized === 'en' || normalized === 'ru' || normalized === 'ua' || normalized === 'de' || normalized === 'fr') {
+        return normalized
+    }
     return null
 }
 
-async function transformInput(el: HTMLInputElement | HTMLTextAreaElement) {
-    const {value} = el, s = el.selectionStart ?? 0, e = el.selectionEnd ?? s, hasSel = e > s
-    const text = (hasSel ? value.slice(s, e) : value).trim()
-    if (!text) return
-    const out = await translate(text, 'input')
-    if (out === null) return
-    el.value = hasSel ? value.slice(0, s) + out + value.slice(e) : out
-    el.setSelectionRange(s + out.length, s + out.length)
-    fireInput(el)
-}
-
-async function transformContentEditable(el: HTMLElement) {
-    const sel = window.getSelection()
-    if (!sel || sel.rangeCount === 0) return
-
-    const hasSel = !sel.isCollapsed && el.contains(sel.anchorNode)
-    const text = (hasSel ? sel.toString() : el.textContent ?? '').trim()
-    if (!text) return
-
-    const savedRange = sel.getRangeAt(0).cloneRange()
-
-    const out = await translate(text, 'input')
-    if (out === null) return
-
-    el.focus()
-    sel.removeAllRanges()
-
-    if (hasSel) {
-        sel.addRange(savedRange)
-    } else {
-        const fullRange = document.createRange()
-        fullRange.selectNodeContents(el)
-        sel.addRange(fullRange)
-    }
-
-    const beforeInputFired = el.dispatchEvent(
-        new InputEvent('beforeinput', {
-            bubbles: true,
-            cancelable: true,
-            inputType: 'insertText',
-            data: out,
+function registerBackgroundMessageHandler(
+    inputController: InputTranslationController,
+    pageController: PageTranslationService,
+) {
+    try {
+        chrome.runtime.onMessage.addListener((msg: unknown) => {
+            const typed = msg as { type?: string; enabled?: boolean; sourceLanguage?: string }
+            if (typed.type === 'APPLY_TRANSFORM_TO_FOCUS') void inputController.transformFocused()
+            if (typed.type === 'SET_PAGE_TRANSLATION' && typeof typed.enabled === 'boolean') {
+                const sourceLanguage = normalizeDetectableLanguage(typed.sourceLanguage)
+                typed.enabled ? pageController.start(sourceLanguage) : pageController.stop()
+            }
         })
-    )
-
-    if (beforeInputFired) {
-        const inserted = document.execCommand('insertText', false, out)
-        if (!inserted) {
-            const range = sel.rangeCount > 0 ? sel.getRangeAt(0) : savedRange
-            range.deleteContents()
-            const node = document.createTextNode(out)
-            range.insertNode(node)
-            range.selectNodeContents(node)
-            range.collapse(false)
-            sel.removeAllRanges()
-            sel.addRange(range)
-            fireInput(el)
-        }
+    } catch (error) {
+        handleExtensionContextError(error)
     }
 }
 
-async function transformFocused() {
-    const el = getEditable()
-    if (!el) return
-    await (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-        ? transformInput(el) : transformContentEditable(el))
-}
+function startContentScript() {
+    pageTranslationService = new PageTranslationService({
+        sendRuntimeMessage,
+        translateWithResponse,
+        showStatus: showTranslationStatus,
+        hideStatus: hideTranslationStatus,
+        handleRuntimeError: handleExtensionContextError,
+        isRuntimeValid: () => extensionContextValid,
+        getTooltip: getSharedTooltip,
+    })
 
-function registerBackgroundMessageHandler() {
-    chrome.runtime.onMessage.addListener((msg: unknown) => {
-        if ((msg as { type?: string })?.type === 'APPLY_TRANSFORM_TO_FOCUS') void transformFocused()
+    new SelectionTranslationController({
+        tooltip: getSharedTooltip(),
+        getVisibleSelectionExtract: (selection, point) => getVisibleSelectionExtract(selection, point),
+        precheck: text => precheckTranslateWithResponse(text, 'selection'),
+        translate: text => translateWithResponse(text, 'selection'),
+        isRuntimeValid: () => extensionContextValid,
+    }).start()
+    const inputTranslationController = new InputTranslationController({
+        translate: text => translate(text, 'input'),
+        showStatus: message => showTranslationStatus('input', message),
+        hideStatus: () => hideTranslationStatus('input'),
+    })
+    registerBackgroundMessageHandler(inputTranslationController, pageTranslationService)
+    pageTranslationService.observeMutations()
+    pageTranslationService.registerStateSync()
+    pageTranslationService.syncState()
+    pageTranslationService.startSuggestionObserver()
+    pageTranslationService.scheduleSuggestion(1200, true)
+    window.addEventListener('load', () => {
+        pageTranslationService?.startSuggestionObserver()
+        pageTranslationService?.scheduleSuggestion(800, true)
+    }, {once: true})
+    window.addEventListener('pageshow', () => {
+        pageTranslationService?.startSuggestionObserver()
+        pageTranslationService?.scheduleSuggestion(700, true)
+    })
+    window.addEventListener('focus', () => {
+        pageTranslationService?.startSuggestionObserver()
+        pageTranslationService?.scheduleSuggestion(900, true)
+    })
+    window.setTimeout(() => pageTranslationService?.scheduleSuggestion(0, true), 3500)
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            pageTranslationService?.startSuggestionObserver()
+            pageTranslationService?.scheduleSuggestion(700, true)
+        }
     })
 }
 
-const TOOLTIP_THEMES = {
-    dark: {
-        background: 'rgba(10, 12, 28, 0.72)',
-        color: '#f1f5f9',
-        border: '1px solid rgba(255,255,255,0.12)',
-        boxShadow: '0 12px 40px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.08)',
-        backdropFilter: 'blur(24px) saturate(180%)',
-        scrollbarColor: 'rgba(255,255,255,0.18) transparent',
-    },
-    light: {
-        background: 'rgba(255,255,255,0.58)',
-        color: '#1e293b',
-        border: '1px solid rgba(255,255,255,0.72)',
-        boxShadow: '0 12px 40px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.8)',
-        backdropFilter: 'blur(24px) saturate(180%)',
-        scrollbarColor: 'rgba(100,116,139,0.32) transparent',
-    },
+function startWhenDocumentElementReady() {
+    if (document.documentElement) {
+        startContentScript()
+        return
+    }
+
+    const observer = new MutationObserver(() => {
+        if (!document.documentElement) return
+
+        observer.disconnect()
+        startContentScript()
+    })
+    observer.observe(document, {childList: true})
 }
 
-function applyTooltipTheme(el: HTMLElement, theme: 'dark' | 'light') {
-    const t = TOOLTIP_THEMES[theme]
-    el.style.background = t.background
-    el.style.color = t.color
-    el.style.border = t.border
-    el.style.boxShadow = t.boxShadow
-    el.style.backdropFilter = t.backdropFilter
-    ;(el.style as any).webkitBackdropFilter = t.backdropFilter
-    el.style.scrollbarColor = t.scrollbarColor
-}
-
-function createTooltip(): TooltipController {
-    if (!document.getElementById(`${TOOLTIP_ID}-style`)) {
-        const s = document.createElement('style')
-        s.id = `${TOOLTIP_ID}-style`
-        s.textContent = `#${TOOLTIP_ID}::-webkit-scrollbar{width:4px}#${TOOLTIP_ID}::-webkit-scrollbar-track{background:transparent}#${TOOLTIP_ID}::-webkit-scrollbar-thumb{background:rgba(148,163,184,.35);border-radius:4px}#${TOOLTIP_ID}::-webkit-scrollbar-thumb:hover{background:rgba(148,163,184,.6)}`
-        document.documentElement.appendChild(s)
-    }
-
-    const el = document.createElement('div')
-    el.id = TOOLTIP_ID
-    Object.assign(el.style, {
-        position: 'fixed', zIndex: '2147483647', maxWidth: '340px',
-        padding: '10px 14px', borderRadius: '16px',
-        font: '13px/1.5 -apple-system,"Segoe UI",sans-serif',
-        display: 'none', whiteSpace: 'pre-wrap', pointerEvents: 'auto',
-        userSelect: 'text', wordBreak: 'break-word', maxHeight: '50vh',
-        overflowY: 'auto', scrollbarWidth: 'thin',
-        transition: 'opacity 0.15s ease',
-    })
-    applyTooltipTheme(el, 'dark')
-    document.documentElement.appendChild(el)
-
-    // Read stored theme and update tooltip; listen for future changes
-    chrome.storage.local.get(['popup_theme'], (data) => {
-        const theme = (data['popup_theme'] as string) === 'light' ? 'light' : 'dark'
-        applyTooltipTheme(el, theme)
-    })
-    chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === 'local' && changes['popup_theme']) {
-            const theme = changes['popup_theme'].newValue === 'light' ? 'light' : 'dark'
-            applyTooltipTheme(el, theme)
-        }
-    })
-
-    let cleanup: (() => void) | null = null
-    const stop = () => {
-        cleanup?.();
-        cleanup = null
-    }
-
-    return {
-        show(text, getRect) {
-            el.textContent = text
-            el.style.display = 'block'
-            stop()
-            const ref: VirtualElement = {getBoundingClientRect: getRect, contextElement: document.documentElement}
-            cleanup = autoUpdate(ref, el, async () => {
-                const {x, y} = await computePosition(ref, el, {
-                    strategy: 'fixed',
-                    placement: 'top',
-                    middleware: MIDDLEWARE
-                })
-                el.style.left = `${x}px`
-                el.style.top = `${y}px`
-            })
-        },
-        hide() {
-            stop();
-            el.style.display = 'none'
-        },
-        isVisible() {
-            return el.style.display !== 'none'
-        },
-    }
-}
-
-function registerSelectionTranslation(tooltip: TooltipController) {
-    let timer: number | null = null, reqId = 0
-    let pointerDownCount = 0
-
-    const tooltipNode = () => document.getElementById(TOOLTIP_ID)
-    const inTooltip = (t: EventTarget | null) => {
-        const n = tooltipNode();
-        return !!n && t instanceof Node && n.contains(t)
-    }
-    const isTooltipSel = (s: Selection) => {
-        const n = tooltipNode();
-        return !!n && (n.contains(s.anchorNode) || n.contains(s.focusNode))
-    }
-    const isEditable = (node: Node | null) => {
-        const el = node instanceof Element ? node : node?.parentElement
-        return !!el && (!!el.closest('input,textarea') || !!(el.closest('[contenteditable]') as HTMLElement)?.isContentEditable)
-    }
-
-    const clearTimer = () => {
-        if (timer !== null) {
-            clearTimeout(timer);
-            timer = null
-        }
-    }
-    const hide = () => {
-        clearTimer();
-        tooltip.hide()
-    }
-
-    const run = async () => {
-        const sel = window.getSelection()
-        if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-            tooltip.hide();
-            return
-        }
-        if (isTooltipSel(sel)) return
-        if (isEditable(sel.anchorNode) || isEditable(sel.focusNode)) {
-            tooltip.hide();
-            return
-        }
-
-        const range = sel.getRangeAt(0).cloneRange()
-        const rects = Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0)
-
-        if (rects.length > 1) {
-            const sorted = [...rects].sort((a, b) => a.top === b.top ? a.left - b.left : a.top - b.top)
-            for (let i = 1; i < sorted.length; i++)
-                if (sorted[i].top - sorted[i - 1].bottom > MAX_GAP_PX) {
-                    tooltip.hide();
-                    return
-                }
-        }
-
-        const text = sel.toString().trim()
-        if (!text) {
-            tooltip.hide();
-            return
-        }
-
-        const getRect = (): DOMRect => Array.from(range.getClientRects()).at(-1) ?? range.getBoundingClientRect()
-        const rect = getRect()
-        if (!rect.width && !rect.height) {
-            tooltip.hide();
-            return
-        }
-
-        tooltip.show('Translating...', getRect)
-        const id = ++reqId
-        const out = await translate(text, 'selection')
-        if (id === reqId) tooltip.show(out ?? 'Failed to translate', getRect)
-    }
-
-    const schedule = () => {
-        if (pointerDownCount > 0) return
-        clearTimer()
-        timer = window.setTimeout(run, DELAY_MS)
-    }
-
-    document.addEventListener('pointerdown', e => {
-        if (e.pointerType === 'mouse') {
-            pointerDownCount++
-            clearTimer() // прерываем предыдущий запуск пока мышь зажата
-        }
-    })
-    document.addEventListener('pointerup', e => {
-        if (e.pointerType === 'mouse') {
-            pointerDownCount = Math.max(0, pointerDownCount - 1)
-            setTimeout(schedule, 0)
-        }
-    })
-    document.addEventListener('pointercancel', e => {
-        if (e.pointerType === 'mouse') pointerDownCount = Math.max(0, pointerDownCount - 1)
-    })
-    document.addEventListener('keyup', e => e.key === 'Escape' ? hide() : schedule())
-    document.addEventListener('scroll', e => {
-        if (tooltip.isVisible() && !inTooltip(e.target)) hide()
-    }, true)
-    document.addEventListener('click', e => {
-        if (tooltip.isVisible() && !inTooltip(e.target)) hide()
-    }, true)
-}
-
-registerSelectionTranslation(createTooltip())
-registerBackgroundMessageHandler()
+startWhenDocumentElementReady()

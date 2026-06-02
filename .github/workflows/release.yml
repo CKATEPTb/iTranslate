@@ -18,18 +18,21 @@ jobs:
         node-version: [ 22 ]
     steps:
       - uses: actions/checkout@v4
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           registry-url: 'https://registry.npmjs.org/'
-          cache: 'pnpm'
+          cache: 'npm'
       - name: Install dependencies
-        run: pnpm install
+        run: npm ci
       - name: Build package
-        run: pnpm build
+        run: npm run check
+      - name: Read package version
+        id: package-version
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
       - name: Rename dist to iTranslate
         run: mv dist iTranslate
       - name: Create archive
@@ -37,8 +40,9 @@ jobs:
       - name: Publish release asset
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: "iTranslate ${{ github.ref_name }}"
+          tag_name: v${{ steps.package-version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: "iTranslate v${{ steps.package-version.outputs.version }}"
           files: iTranslate.zip
           generate_release_notes: true
         env:
