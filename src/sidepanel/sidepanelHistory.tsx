@@ -70,15 +70,15 @@ type HistoryCardProps = {
 function HistoryCard({entry, formatTime, onDelete, onLoad}: HistoryCardProps) {
     return (
         <div
-            class="rounded-lg border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-2.5 cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition"
+            class="min-w-0 rounded-lg border border-slate-200 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/70 p-2.5 cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition"
             onclick={() => onLoad(entry)}
         >
-            <div class="flex items-center gap-2 mb-1.5">
-                <span class="text-xs font-semibold text-blue-500 dark:text-blue-400">{entry.provider}</span>
-                <span class="text-xs text-slate-400 dark:text-slate-500">
+            <div class="flex min-w-0 items-center gap-2 mb-1.5">
+                <span class="flex-shrink-0 text-xs font-semibold text-blue-500 dark:text-blue-400">{entry.provider}</span>
+                <span class="min-w-0 truncate text-xs text-slate-400 dark:text-slate-500">
                     {LANG_LABELS[entry.from as LangCode] ?? entry.from} {'->'} {LANG_LABELS[entry.to as LangCode] ?? entry.to}
                 </span>
-                <span class="text-xs text-slate-400 dark:text-slate-500 flex-1 text-right">{formatTime(entry.timestamp)}</span>
+                <span class="min-w-0 flex-1 truncate text-right text-xs text-slate-400 dark:text-slate-500">{formatTime(entry.timestamp)}</span>
                 <button
                     onclick={(event: MouseEvent) => {
                         event.stopPropagation()
