@@ -22,6 +22,7 @@ export type PageTranslationTabSession = {
   sourceLanguage?: DetectableLanguage
   hostname?: string
   documentId?: string
+  ignoreSitePreference?: boolean
 }
 
 type StoredPageTranslationTabSession = boolean | {
