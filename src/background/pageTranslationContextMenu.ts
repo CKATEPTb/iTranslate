@@ -16,9 +16,31 @@ const PAGE_TRANSLATION_CONTEXT_MENU_TITLES: Record<string, string> = {
 
 type StartPageTranslationFromContextMenu = (tab: chrome.tabs.Tab) => Promise<void>
 type GetPageTranslationTargetLanguage = () => Promise<string | undefined>
+type ContextMenuUpdateProperties = Parameters<typeof chrome.contextMenus.update>[1]
 
-function consumeLastError() {
-  void chrome.runtime.lastError
+function readLastErrorMessage(): string | undefined {
+  return chrome.runtime.lastError?.message
+}
+
+function removeAllContextMenus(): Promise<string | undefined> {
+  return new Promise(resolve => {
+    chrome.contextMenus.removeAll(() => resolve(readLastErrorMessage()))
+  })
+}
+
+function createContextMenu(properties: chrome.contextMenus.CreateProperties): Promise<string | undefined> {
+  return new Promise(resolve => {
+    chrome.contextMenus.create(properties, () => resolve(readLastErrorMessage()))
+  })
+}
+
+function updateContextMenu(
+  id: string,
+  properties: ContextMenuUpdateProperties,
+): Promise<string | undefined> {
+  return new Promise(resolve => {
+    chrome.contextMenus.update(id, properties, () => resolve(readLastErrorMessage()))
+  })
 }
 
 function normalizeTargetLanguage(language: string | undefined): string {
@@ -38,33 +60,36 @@ export function installPageTranslationContextMenu(
   startPageTranslation: StartPageTranslationFromContextMenu,
   getTargetLanguage: GetPageTranslationTargetLanguage,
 ) {
-  const updateMenuTitle = async () => {
-    const title = await getContextMenuTitle(getTargetLanguage)
-    chrome.contextMenus.update(PAGE_TRANSLATION_CONTEXT_MENU_ID, {title}, consumeLastError)
+  let menuOperation = Promise.resolve()
+
+  const queueMenuOperation = (operation: () => Promise<void>) => {
+    menuOperation = menuOperation.then(operation, operation)
+    return menuOperation
   }
 
-  const createMenu = async () => {
+  const rebuildMenu = async () => {
     const title = await getContextMenuTitle(getTargetLanguage)
-    chrome.contextMenus.create({
+    await removeAllContextMenus()
+    await createContextMenu({
       id: PAGE_TRANSLATION_CONTEXT_MENU_ID,
       title,
       contexts: PAGE_TRANSLATION_CONTEXTS,
       documentUrlPatterns: ['http://*/*', 'https://*/*', 'file:///*'],
-    }, consumeLastError)
-  }
-
-  const resetMenu = () => {
-    chrome.contextMenus.remove(PAGE_TRANSLATION_CONTEXT_MENU_ID, () => {
-      consumeLastError()
-      void createMenu()
     })
   }
 
+  const updateMenuTitle = async () => {
+    const title = await getContextMenuTitle(getTargetLanguage)
+    const error = await updateContextMenu(PAGE_TRANSLATION_CONTEXT_MENU_ID, {title})
+    if (error) await rebuildMenu()
+  }
+
+  const resetMenu = () => void queueMenuOperation(rebuildMenu)
   resetMenu()
-  chrome.runtime.onInstalled.addListener(resetMenu)
-  chrome.runtime.onStartup.addListener(resetMenu)
+  chrome.runtime.onInstalled.addListener(() => resetMenu())
+  chrome.runtime.onStartup.addListener(() => resetMenu())
   chrome.storage.onChanged.addListener((_, area) => {
-    if (area === 'sync') void updateMenuTitle()
+    if (area === 'sync') void queueMenuOperation(updateMenuTitle)
   })
 
   chrome.contextMenus.onClicked.addListener((info, tab) => {
