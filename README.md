@@ -2,9 +2,15 @@
 
 iTranslate is a Chromium extension for fast text and page translation. It can translate selected text, focused input fields, the side panel text box, and full web pages with configurable translation providers.
 
-Version: 1.4.4
+Version: 1.4.5
 
 ## Release Notes
+
+### 1.4.5
+
+- Added a browser context menu action to start page translation with iTranslate.
+- Localized the context menu title to the configured target language.
+- Allowed manual context-menu page translation even when the automatic prompt was disabled for the current site.
 
 ### 1.4.4
 
@@ -41,6 +47,7 @@ Version: 1.4.4
 - Translate focused input, textarea, and contenteditable text with a keyboard shortcut.
 - Translate text manually in the side panel with local history.
 - Suggest page translation when visible page content does not match the target language.
+- Start page translation from the browser context menu.
 - Translate only visible page content and continue translating later page updates.
 - Translate input and textarea placeholders during page translation.
 - Show original page text in a copyable tooltip after a short hover delay.
@@ -92,6 +99,8 @@ The prompt closes automatically if you do not interact with it. Hovering the pro
 When page translation is active, the extension observes the document, open shadow roots, and all extension-accessible frames. New or changed visible text is translated without requiring a page reload. If content updates but the actual text did not change, the extension avoids sending another translation request.
 
 You can manage page translation rules from the popup by opening the Page translation rules button above the provider selector.
+
+You can also start page translation manually from the browser context menu. This is useful when the automatic translation prompt was dismissed or disabled for the current site.
 
 ## Original Text Tooltip
 
