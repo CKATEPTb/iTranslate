@@ -2,7 +2,7 @@
   "name": "itranslate",
   "author": "CKATEPTb",
   "private": true,
-  "version": "1.4.5",
+  "version": "1.4.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
