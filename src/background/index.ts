@@ -7,6 +7,7 @@ import {
   PageTranslationSessionStore,
   type PageTranslationTabSession,
 } from './pageTranslationState.ts'
+import {installPageTranslationContextMenu} from './pageTranslationContextMenu.ts'
 import {normalizeDetectableLanguage} from './detectableLanguage.ts'
 import {analyzePageTranslationSamples} from './pageTranslationAnalysis.ts'
 import {
@@ -37,6 +38,10 @@ const pageTranslationSessions = new PageTranslationSessionStore(normalizeDetecta
 
 bindSettingsCacheInvalidation()
 
+type PageTranslationActivationOptions = {
+  ignoreSitePreference?: boolean
+}
+
 async function disablePageTranslationForTab(tabId: number) {
   await pageTranslationSessions.clear(tabId)
   void sendTabMessage(tabId, {type: 'SET_PAGE_TRANSLATION', enabled: false})
@@ -53,12 +58,13 @@ async function getPageTranslationTabSession(
     return null
   }
 
-  if (tab && (await pageTranslationPreferences.getSiteForTab(tab)).never) {
+  const cached = pageTranslationSessions.get(tabId)
+  const sitePreference = tab ? await pageTranslationPreferences.getSiteForTab(tab) : {}
+  if (tab && sitePreference.never && !cached?.ignoreSitePreference) {
     await disablePageTranslationForTab(tabId)
     return null
   }
 
-  const cached = pageTranslationSessions.get(tabId)
   if (cached) {
     const currentHostname = tab ? getHostnameFromUrl(tab.url) : ''
     if (cached.hostname && currentHostname && cached.hostname !== currentHostname) {
@@ -159,13 +165,13 @@ async function getActivePageTranslationState() {
   const supported = supportsPageTranslation(settings.provider, settings)
   const hostname = getHostnameFromUrl(tab.url)
   const preferenceSummary = await pageTranslationPreferences.summarize(hostname)
-  const disabledBySite = preferenceSummary.never
+  const session = await getPageTranslationTabSession(tab.id, tab)
+  const disabledBySite = preferenceSummary.never && !session?.ignoreSitePreference
   if (!supported || disabledBySite) {
     await disablePageTranslationForTab(tab.id)
     return {enabled: false, supported, disabledBySite, ...preferenceSummary}
   }
 
-  const session = await getPageTranslationTabSession(tab.id, tab)
   return {
     enabled: !!session,
     sourceLanguage: session?.sourceLanguage,
@@ -181,6 +187,7 @@ async function setPageTranslationStateForTab(
   sourceLanguage?: string,
   persist = false,
   documentId?: string,
+  options: PageTranslationActivationOptions = {},
 ): Promise<boolean> {
   if (tab?.id == null) {
     throw new Error('No active tab')
@@ -196,7 +203,7 @@ async function setPageTranslationStateForTab(
     }
 
     const preference = await pageTranslationPreferences.getSiteForTab(tab)
-    if (preference.never) {
+    if (preference.never && !options.ignoreSitePreference) {
       throw new Error('Page translation is disabled for this site')
     }
   }
@@ -208,6 +215,7 @@ async function setPageTranslationStateForTab(
     ...(normalizedSourceLanguage ? {sourceLanguage: normalizedSourceLanguage} : {}),
     ...(hostname ? {hostname} : {}),
     ...(documentId ? {documentId} : {}),
+    ...(options.ignoreSitePreference ? {ignoreSitePreference: true} : {}),
   }
 
   if (enabled) {
@@ -231,6 +239,14 @@ async function setActivePageTranslationState(request: PageTranslationSetActiveMe
   }
 
   return setPageTranslationStateForTab(tab, request.enabled, request.sourceLanguage, request.persist === true, sender?.documentId)
+}
+
+async function startPageTranslationFromContextMenu(tab: chrome.tabs.Tab): Promise<void> {
+  await setPageTranslationStateForTab(tab, true, undefined, false, undefined, {ignoreSitePreference: true})
+}
+
+async function getPageTranslationTargetLanguage(): Promise<string | undefined> {
+  return (await readSettings()).translate_select_to
 }
 
 async function getPageTranslationSuggestSettings(request: PageTranslationSuggestSettingsMessage) {
@@ -402,6 +418,8 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
 chrome.tabs.onRemoved.addListener((tabId) => {
   void pageTranslationSessions.clear(tabId)
 })
+
+installPageTranslationContextMenu(startPageTranslationFromContextMenu, getPageTranslationTargetLanguage)
 
 // command handler
 chrome.commands.onCommand.addListener((command) => {
